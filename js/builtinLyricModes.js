@@ -247,33 +247,75 @@ var BuiltinLyricModes = (function () {
     this.box.innerHTML = '';
   };
 
-  /* ================= 静止 ================= */
+  /* ================= 静止（对齐 Folia VisualizerStill） ================= */
 
   function StillScene(box) { Scene.call(this, box); }
   inherit(StillScene, Scene);
 
-  StillScene.prototype.onLine = function (s) {
-    if (!this.wrap) {
-      this.wrap = el('div', 'position:absolute;left:0;right:0;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:12px;text-align:center;', this.box);
-      this.prevEl = el('div', 'font-size:22px;color:rgba(255,255,255,.3);', this.wrap);
-      this.curEl = el('div', 'font-size:40px;font-weight:600;letter-spacing:1px;', this.wrap);
-      this.nextEl = el('div', 'font-size:22px;color:rgba(255,255,255,.28);', this.wrap);
-      this.trEl = el('div', 'font-size:18px;color:rgba(255,255,255,.5);margin-top:4px;', this.wrap);
+  StillScene.prototype.mount = function () {
+    // Folia：不渲染背景，只在最上层压一层中心透明的径向暗角
+    this.vignette = el('div', 'position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center, transparent 0%, #000 100%);opacity:.65;', this.box);
+    this.wrap = el('div', 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;padding:0 48px 64px;pointer-events:none;text-align:center;', this.box);
+    this.slots = [];
+    for (var i = 0; i < 3; i++) {
+      var slot = el('div', 'width:100%;max-width:896px;display:flex;flex-direction:column;align-items:center;', this.wrap);
+      var text = el('div', 'line-height:1.25;letter-spacing:.02em;white-space:pre-wrap;', slot);
+      var tr = el('div', 'letter-spacing:.02em;white-space:pre-wrap;', slot);
+      this.slots.push({ slot: slot, text: text, tr: tr });
     }
+  };
+
+  StillScene.prototype.onLine = function (s) {
+    if (!this.wrap) this.mount();
     var lines = s.lines || [];
-    var prev = prevLine(s);
-    setText(this.prevEl, prev ? prev.text : '');
-    setText(this.curEl, currentText(s));
-    setText(this.nextEl, s.index >= 0 && lines[s.index + 1] ? lines[s.index + 1].text : '');
-    setText(this.trEl, currentTr(s));
-    this.prevEl.style.fontSize = this.fs(22) + 'px';
-    this.curEl.style.fontSize = this.fs(40) + 'px';
-    this.nextEl.style.fontSize = this.fs(22) + 'px';
-    this.trEl.style.fontSize = this.fs(18) + 'px';
+    // Folia 在 currentLineIndex === -1 时沿用上一个有效句
+    if (s.index >= 0) this.effIndex = s.index;
+    else if (this.effIndex == null) this.effIndex = Math.max(0, s.index);
+    var idx = this.effIndex;
+    var showTr = !s.opts || s.opts.translation !== false;
+    var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
+
+    for (var k = 0; k < 3; k++) {
+      var offset = k - 1;
+      var line = lines[idx + offset];
+      var view = this.slots[k];
+      var isCurrent = offset === 0;
+      if (!line) {
+        view.slot.style.height = Math.round(80 * base) + 'px';
+        setText(view.text, '');
+        setText(view.tr, '');
+        view.tr.style.display = 'none';
+        continue;
+      }
+      view.slot.style.height = '';
+      setText(view.text, line.text || '');
+      view.text.style.fontSize = Math.round((isCurrent ? 40 : 30) * base) + 'px';
+      view.text.style.fontWeight = isCurrent ? '700' : '600';
+      view.text.style.opacity = isCurrent ? '1' : '0.3';
+      view.text.style.color = hex(this.colors.primary);
+      var trText = showTr ? (line.tr || '') : '';
+      setText(view.tr, trText);
+      view.tr.style.display = trText ? '' : 'none';
+      view.tr.style.fontSize = Math.round((isCurrent ? 24 : 20) * base) + 'px';
+      view.tr.style.fontWeight = isCurrent ? '500' : '400';
+      view.tr.style.opacity = isCurrent ? '0.8' : '0.3';
+      view.tr.style.marginTop = (isCurrent ? 12 : 8) + 'px';
+      view.tr.style.color = hex(this.colors.secondary);
+    }
   };
 
   StillScene.prototype.applyTheme = function (c) {
-    if (this.curEl) this.curEl.style.color = c.accentCss;
+    if (!this.slots || !this.line) return;
+    for (var k = 0; k < 3; k++) {
+      this.slots[k].text.style.color = hex(c.primary);
+      this.slots[k].tr.style.color = hex(c.secondary);
+    }
+  };
+
+  StillScene.prototype.dispose = function () {
+    this.slots = null;
+    this.wrap = null;
+    Scene.prototype.dispose.call(this);
   };
 
   /* ================= 流光 ================= */
