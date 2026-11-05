@@ -39,10 +39,22 @@ MusicTap 是一个纯前端、无构建的网页音画作品：点击或拖拽�
 
 **歌词演出**
 
-- 14 种演出模式：关闭、经典单行、逐字点亮，以及从 Folia 移植的 11 种场景
+- 14 种内置演出模式：关闭、经典单行、逐字点亮，以及从 Folia 移植的 11 种场景
 - 其中 7 种为沉浸式（浮名、莫奈、回环、镜台、时计、商籁、凝彩），会覆盖画布只保留歌词与氛围
 - 通用参数（字体 / 字号 / 透明度）与逐模式参数，实时生效
-- 模组系统：`mods/<id>/mod.js` 即插即用，内置 `sample-glow`（声光歌词）与 `wave-light`（动感波光）
+- 模组系统：经典脚本模组（`mods/<id>/mod.js`）与原生 Folia ESM 模组（`mods/<id>/client.js`）都可用
+
+**已内置模组**
+
+| 模组 | 版本 | 作用 |
+| --- | --- | --- |
+| `sample-glow` | 0.1.0 | 示例模组：当前句居中，光晕随音频能量呼吸 |
+| `wave-light` | 1.5.1 | 动感波光（沉浸式）：封面主色波光 + 层中歌词 + 关键字水印 + 翻译 |
+| `vinyl-disc` | 1.7.10 | 黑胶唱片：封面当碟心，播放时唱片旋转、唱臂落下，暂停即停转 |
+| `cinerama` | 1.0.0 | 巨幕歌词：大字报、跑马灯带、斜切丝带，像 LED 大屏一样呈现 |
+| `k3panel` | 1.0.1 | 商籁深度精调：给商籁追加相机、逐字运动、视差、转场等 11 个倍率参数 |
+
+> ESM 模组通过动态 `import()` 加载。用 `file://` 直接打开时浏览器会拦截模块脚本，这三个模组会被跳过；用本机或局域网 `http://` 打开即可正常加载。原生模组已从 `.mjs` 改为 `.js`（Python 自带的静态服务器不识别 `.mjs` 的 MIME 类型）。
 
 **界面与可访问性**
 
@@ -163,14 +175,18 @@ MusicTap/
 │   ├── visualizerRegistry.js
 │   ├── builtinLyricModes.js  # 11 种 Folia 演出场景
 │   ├── lyricTunings.js   # 通用 / 逐模式参数
-│   ├── modHost.js        # 模组宿主
+│   ├── modHost.js        # 模组宿主（visualizers / tunings 注册表）
+│   ├── modLoader.js      # ESM 模组加载桥（动态 import）
 │   ├── netease.js        # 网易云 API 封装
 │   ├── player.js         # 播放队列与歌词同步
 │   ├── player-ui.js      # 播放器 UI 绑定
 │   └── themes.js
 ├── mods/
-│   ├── sample-glow/      # 示例模组：声光歌词
-│   └── wave-light/       # 动感波光模组
+│   ├── sample-glow/      # 示例模组：声光歌词（经典脚本）
+│   ├── wave-light/       # 动感波光（经典脚本）
+│   ├── vinyl-disc/       # 黑胶唱片（ESM）
+│   ├── cinerama/         # 巨幕歌词（ESM）
+│   └── k3panel/          # 商籁深度精调（ESM tunings）
 ├── vendor/               # jQuery / PIXI / pixi-filters（本地化）
 ├── docs/                 # README 预览图
 ├── LICENSE
@@ -243,7 +259,10 @@ server {
 - [Mikutap](https://aidn.jp/mikutap/)（daniwell / Aidn）—— 点击即演奏的交互范式
 - [folia-major](https://github.com/Masterq8/folia-major) —— 歌词演出与模组系统的设计参考
 - visualizer52hz、wave-light —— 歌词演出模组来源
+- vinyl-disc（pomepii）、cinerama（tumuyan）、k3panel —— Folia 社区模组，已适配本项目的模组宿主
 - [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) —— 网易云接口服务
+
+各模组的版权与许可证见 `mods/<id>/` 目录内的说明文件。
 
 README 中的播放器截图使用演示数据，非真实账号内容。
 

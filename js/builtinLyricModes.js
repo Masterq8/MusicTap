@@ -1222,7 +1222,7 @@ var BuiltinLyricModes = (function () {
     this.box.style.border = (frame === 'none' || textOnly) ? 'none' : '1px solid rgba(255,255,255,.1)';
     this.frameDecor.style.display = (frame === 'full' && !textOnly) ? '' : 'none';
     this.box.style.boxSizing = 'border-box';
-    var motion = this.tun('textMotion', 1);
+    var motion = this.tun('textMotion', 1) * this.tun('motionScale', 1) * this.tun('transitionMotionScale', 1);
     var transition = this.tun('sceneTransition', true);
     this.curEl.style.animation = 'none';
     void this.curEl.offsetWidth;
@@ -1236,9 +1236,20 @@ var BuiltinLyricModes = (function () {
     var power = powerOf(s);
     this.bar.style.background = this.colors.accentCss;
     this.bar.style.transform = 'scaleY(' + (0.75 + 0.25 * power).toFixed(3) + ')';
-    var camera = this.tun('cameraMotion', 1);
-    this.grid.style.transform = 'translate(' + (2 * camera * Math.sin(this.elapsed * 0.2)).toFixed(1) + 'px,' + (2 * camera * Math.cos(this.elapsed * 0.18)).toFixed(1) + 'px)';
-    this.hollow.style.transform = 'translateX(' + (6 * Math.sin(this.elapsed * 0.15) * camera).toFixed(1) + 'px)';
+    // K3Panel 倍率（默认 1，未启用模组时与原来完全一致）
+    var camera = this.tun('cameraMotion', 1) * this.tun('cameraScale', 1);
+    var swim = this.tun('mgSwimScale', 1);
+    var drift = this.tun('driftScale', 1);
+    var parallax = this.tun('parallaxScale', 1);
+    var breath = this.tun('breathScale', 1);
+    var ca = this.tun('caScale', 1);
+    var ghost = this.tun('ghostScale', 1);
+    var blur = this.tun('transitionBlurScale', 1);
+    var glitch = this.tun('transitionGlitchScale', 1);
+    this.grid.style.transform = 'translate(' + (2 * camera * swim * Math.sin(this.elapsed * 0.2)).toFixed(1) + 'px,' + (2 * camera * swim * Math.cos(this.elapsed * 0.18)).toFixed(1) + 'px)';
+    this.hollow.style.transform = 'translateX(' + (6 * Math.sin(this.elapsed * 0.15) * camera * parallax).toFixed(1) + 'px) scale(' + (1 + 0.012 * breath * Math.sin(this.elapsed * 1.1)).toFixed(4) + ')';
+    if (this.nextEl) this.nextEl.style.transform = 'translateY(' + (4 * Math.sin(this.elapsed * 0.9) * drift).toFixed(1) + 'px)';
+    if (this.page) this.page.style.transform = 'translateY(' + (3 * Math.cos(this.elapsed * 0.7) * drift).toFixed(1) + 'px)';
     var post = this.tun('postFx', true);
     var contrast = post && this.tun('contrast', true);
     var filters = [];
@@ -1251,9 +1262,17 @@ var BuiltinLyricModes = (function () {
         ? 'radial-gradient(rgba(255,255,255,.08) 0.7px, transparent 0.7px)' : 'none';
     this.fx.style.backgroundSize = (post && this.tun('halftone', false)) ? '6px 6px' : '3px 3px';
     this.fx.style.opacity = post && (this.tun('halftone', false) || this.tun('grain', true)) ? '0.35' : '0';
-    this.curEl.style.textShadow = (post && this.tun('rgbShift', false))
-      ? '2px 0 rgba(255,0,80,.35), -2px 0 rgba(0,200,255,.35)' : (post && this.tun('lensDispersion', false))
-        ? '1px 0 rgba(255,0,80,.3), -1px 0 rgba(0,120,255,.3)' : 'none';
+    var shadows = [];
+    if (post && this.tun('rgbShift', false)) {
+      var off = (2 * ca + Math.sin(this.elapsed * 12) * 0.6 * glitch).toFixed(2);
+      shadows.push(off + 'px 0 rgba(255,0,80,.35)', '-' + off + 'px 0 rgba(0,200,255,.35)');
+    } else if (post && this.tun('lensDispersion', false)) {
+      var off2 = (1 * ca).toFixed(2);
+      shadows.push(off2 + 'px 0 rgba(255,0,80,.3)', '-' + off2 + 'px 0 rgba(0,120,255,.3)');
+    }
+    if (ghost > 1) shadows.push('0 0 ' + (8 * ghost).toFixed(1) + 'px rgba(255,255,255,' + Math.min(.28, 0.1 * ghost).toFixed(2) + ')');
+    this.curEl.style.textShadow = shadows.length ? shadows.join(', ') : 'none';
+    this.curEl.style.filter = blur > 1 ? 'blur(' + ((blur - 1) * 0.9).toFixed(2) + 'px)' : 'none';
     this.curEl.style.transform = (post && this.tun('lensDistort', false)) ? 'perspective(900px) rotateX(0.35deg)' : 'none';
     var res = this.tun('textureRes', '1');
     this.curEl.style.textRendering = res === '1' ? 'optimizeSpeed' : 'geometricPrecision';

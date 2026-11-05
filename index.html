@@ -10,10 +10,10 @@
   <meta name="description" content="星海共振 - 点击屏幕生成音效与粒子波纹的音画交互作品。">
   <title>星海共振 · Stellar Resonance</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link charset="utf-8" href="css/utatap.css?v=20261105" rel="stylesheet">
-  <script charset="utf-8" src="vendor/jquery.min.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="vendor/pixi.min.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="vendor/pixi-filters.min.js?v=20261105" type="text/javascript"></script>
+  <link charset="utf-8" href="css/utatap.css?v=20261110" rel="stylesheet">
+  <script charset="utf-8" src="vendor/jquery.min.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="vendor/pixi.min.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="vendor/pixi-filters.min.js?v=20261110" type="text/javascript"></script>
 </head>
 
 <body>
@@ -386,32 +386,60 @@
     </div>
   </div>
 
-  <script charset="utf-8" src="js/themes.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyrics.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricTiming.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricTunings.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/visualizerRegistry.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricStage.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/builtinLyricModes.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/modHost.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="mods/sample-glow/mod.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="mods/wave-light/mod.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/bgLayer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/audioEngine.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/flowField.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/meshReformer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/metaballRenderer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/parallaxStarfield.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/particleSystem.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/rippleEffect.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/spectrumVisualizer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/gridLayer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/coreLayer.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/djFxEngine.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/netease.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/player.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/player-ui.js?v=20261105" type="text/javascript"></script>
-  <script charset="utf-8" src="js/main.js?v=20261105" type="text/javascript"></script>
+  <script charset="utf-8" src="js/themes.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyrics.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricTiming.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricTunings.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/visualizerRegistry.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricStage.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/builtinLyricModes.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/modHost.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/modLoader.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="mods/sample-glow/mod.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="mods/wave-light/mod.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" type="text/javascript">
+    // 原生 Folia 模组（ES Module）：由 modLoader 动态 import 后接入 UTAMods
+    UTAModsESM.register({
+      id: 'vinyl-disc',
+      entry: 'mods/vinyl-disc/client.js',
+      name: '黑胶唱片',
+      version: '1.7.10',
+      author: 'pomepii',
+      description: '歌词动画模式：当前歌曲封面作碟心，播放时唱片旋转、唱臂落下，暂停时停止。'
+    });
+    UTAModsESM.register({
+      id: 'cinerama',
+      entry: 'mods/cinerama/client.js',
+      name: '巨幕歌词动画',
+      version: '1.0.0',
+      author: 'tumuyan',
+      description: '大字报、跑马灯带、斜切丝带等歌词效果，像 LED 大屏一样呈现歌词。'
+    });
+    UTAModsESM.register({
+      id: 'k3panel',
+      entry: 'mods/k3panel/client.js',
+      name: 'K3Panel 商籁深度精调',
+      version: '1.0.1',
+      author: 'Folia Mod Samples',
+      description: '为商籁动画提供相机、逐字运动、视差、转场等倍率参数，出现在商籁的参数面板下方。'
+    });
+  </script>
+  <script charset="utf-8" src="js/bgLayer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/audioEngine.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/flowField.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/meshReformer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/metaballRenderer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/parallaxStarfield.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/particleSystem.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/rippleEffect.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/spectrumVisualizer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/gridLayer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/coreLayer.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/djFxEngine.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/netease.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/player.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/player-ui.js?v=20261110" type="text/javascript"></script>
+  <script charset="utf-8" src="js/main.js?v=20261110" type="text/javascript"></script>
 </body>
 
 </html>

@@ -395,8 +395,9 @@ var LyricStage = (function () {
       this.active.dispose();
       this.active = null;
     }
-    this.active = def.create({ getTheme: this.opts.getTheme });
+    this.active = def.create({ getTheme: this.opts.getTheme, lines: this._norm || [] });
     this.mode = def.id;
+    this._mountedWithLines = !!(this._norm && this._norm.length);
     this.active.mount(this.host);
     if (this.active.resize) this.active.resize(this.width, this.height);
     // 请求的模式尚不可用（例如模组还没启用）时，不要覆盖用户已保存的选择
@@ -422,6 +423,15 @@ var LyricStage = (function () {
       this._norm = (lines && lines.length && typeof LyricTiming !== 'undefined')
         ? LyricTiming.normalize(lines, duration)
         : [];
+    }
+
+    // 部分模组（如 cinerama）只在 mount 时读取并编译歌词；挂载时若还没有歌词，
+    // 等首帧拿到规范化歌词后重新挂载一次
+    if (this.active && !this._mountedWithLines && this._norm.length) {
+      var keepMode = this.mode;
+      this.mode = null;
+      this.setMode(keepMode);
+      return;
     }
 
     var time = +state.time || 0;

@@ -1,0 +1,10 @@
+{
+  "folium": 1,
+  "id": "cinerama",
+  "name": "巨幕歌词动画",
+  "version": "1.0.0",
+  "author": "tumuyan",
+  "description": "巨幕歌词动画：包含大字报、跑马灯带、斜切丝带等歌词效果，像LED大屏一样呈现歌词。",
+  "client": "client.js",
+  "preview": "preview.jpg"
+}

@@ -69,6 +69,32 @@ var UTAMods = (function () {
     return Object.prototype.hasOwnProperty.call(mods, id) ? mods[id] : null;
   }
 
+  /* ---------------- 标签与 schema 归一化（兼容 Folia 的 { 'zh-CN': ... } 写法） ---------------- */
+
+  function labelText(v) {
+    if (!v) return '';
+    if (typeof v === 'string') return v;
+    return v['zh-CN'] || v.zh || v['en-US'] || v.en || '';
+  }
+
+  function normalizeSettings(schemas) {
+    return (schemas || []).filter(function (s) { return s && s.key; }).map(function (s) {
+      return {
+        key: s.key,
+        type: s.type,
+        label: labelText(s.label) || s.key,
+        description: labelText(s.description) || '',
+        min: s.min,
+        max: s.max,
+        step: s.step,
+        defaultValue: s.defaultValue,
+        options: (s.options || []).map(function (o) {
+          return { value: o && o.value != null ? o.value : '', label: labelText(o && o.label) || String(o && o.value) };
+        })
+      };
+    });
+  }
+
   /* ---------------- 设置 schema ---------------- */
 
   function optionValues(schema) {
@@ -276,6 +302,9 @@ var UTAMods = (function () {
       registries: {
         visualizers: {
           register: function (def) { return registerVisualizer(mod, def); }
+        },
+        tunings: {
+          register: function (def) { return registerTuning(mod, def); }
         }
       },
       settings: {
@@ -307,14 +336,93 @@ var UTAMods = (function () {
     };
   }
 
+  /** 把模组在 visualizer.register 里声明的设置并入模组设置面板 */
+  function mergeModSettings(mod, schemas) {
+    var normalized = normalizeSettings(schemas);
+    if (!normalized.length) return;
+    var added = false;
+    normalized.forEach(function (schema) {
+      var exists = (mod.def.settings || []).some(function (s) { return s.key === schema.key; });
+      if (exists) return;
+      mod.def.settings.push(schema);
+      if (mod.settings[schema.key] === undefined) mod.settings[schema.key] = defaultValueOf(schema);
+      if (!store.settings[mod.def.id]) store.settings[mod.def.id] = {};
+      if (store.settings[mod.def.id][schema.key] === undefined) {
+        store.settings[mod.def.id][schema.key] = mod.settings[schema.key];
+      }
+      added = true;
+    });
+    if (added) {
+      saveStore();
+      emit();
+    }
+  }
+
+  /** Folia tunings：把模组带来的参数组挂到目标模式的参数面板（如 k3panel → 商籁） */
+  function registerTuning(mod, def) {
+    if (!def || !def.target) throw new Error('tunings: target is required');
+    var params = def.params || [];
+    if (typeof LyricTunings === 'undefined' || !params.length) {
+      return { id: 'mod:' + mod.def.id + ':tunings', unregister: function () {} };
+    }
+
+    // Folia 里是 'sonnet'，本项目内置模式 id 为 'folia-sonnet'，这里做一次别名解析
+    var target = def.target;
+    if (!LyricTunings.hasMode(target) && LyricTunings.hasMode('folia-' + target)) {
+      target = 'folia-' + target;
+    }
+
+    var groups = {};
+    var order = [];
+    params.forEach(function (p) {
+      if (!p || !p.key) return;
+      var title = labelText(p.group) || labelText(def.label) || mod.def.name || '附加参数';
+      if (!groups[title]) { groups[title] = { title: title, fields: [] }; order.push(title); }
+      groups[title].fields.push({
+        key: p.key,
+        type: p.type === 'boolean' ? 'boolean' : (p.type === 'select' ? 'select' : 'number'),
+        label: labelText(p.label) || p.key,
+        min: p.min,
+        max: p.max,
+        step: p.step,
+        defaultValue: p.defaultValue,
+        options: (p.options || []).map(function (o) {
+          return { value: o && o.value != null ? o.value : '', label: labelText(o && o.label) || String(o && o.value) };
+        })
+      });
+    });
+
+    var ids = [];
+    order.forEach(function (title, i) {
+      var gid = 'mod-' + mod.def.id + '-' + (i + 1);
+      LyricTunings.registerExternal(target, gid, groups[title]);
+      ids.push(gid);
+    });
+
+    var removed = false;
+    var handle = {
+      id: 'mod:' + mod.def.id + ':tunings',
+      unregister: function () {
+        if (removed) return;
+        removed = true;
+        ids.forEach(function (gid) { LyricTunings.unregisterExternal(target, gid); });
+      }
+    };
+    mod.disposers.push(handle.unregister);
+    notifyVisualizers();
+    return handle;
+  }
+
   function registerVisualizer(mod, def) {
     if (!def || !def.id) throw new Error('visualizer: id is required');
     if (typeof def.mount !== 'function') throw new Error('visualizer: mount(container, ctx) is required');
 
+    mergeModSettings(mod, def.settings);
+
     var id = 'mod:' + mod.def.id + ':' + def.id;
     var handle = VisualizerRegistry.register({
       id: id,
-      label: def.label || def.id,
+      label: labelText(def.label) || def.id,
       order: 900 + (typeof def.order === 'number' ? def.order : 0),
       scope: def.scope === 'immersive' ? 'immersive' : 'lyric',
       create: function (opts) { return createModRenderer(mod, def, opts); }
@@ -371,14 +479,37 @@ var UTAMods = (function () {
     });
   }
 
+  /** 挂载瞬间可能还没有真实主题，先给一份兜底，避免模组在 mount 里读 theme 报错 */
+  var FALLBACK_THEME = null;
+  function fallbackTheme() {
+    if (FALLBACK_THEME) return FALLBACK_THEME;
+    var src = null;
+    if (window.THEMES) {
+      src = window.THEMES.nebula || window.THEMES[Object.keys(window.THEMES)[0]] || null;
+    }
+    FALLBACK_THEME = mapTheme(src) || {
+      name: 'fallback',
+      backgroundColor: 0x0a0420,
+      primaryColor: 0x00f0ff,
+      accentColor: 0x00f0ff,
+      secondaryColor: 0x7ef0ff,
+      fontStyle: 'sans',
+      fontWeight: '300',
+      animationIntensity: 'normal',
+      isDaylight: false
+    };
+    return FALLBACK_THEME;
+  }
+
   function createModRenderer(mod, def, opts) {
     var hooks = { frame: [], resize: [], change: [], time: [], dispose: [] };
     var stateRef = {
       visible: false, time: 0, duration: 0, index: -1, paused: true,
-      line: null, next: null, lines: [], width: 0, height: 0,
+      line: null, next: null, lines: (opts && opts.lines) ? projectLines(opts.lines) : [], width: 0, height: 0,
       theme: null, audio: null, coverUrl: '', song: null
     };
     var last = { index: -2, paused: null, theme: null, cover: null };
+    var size = { w: 0, h: 0 };
     var themeSrc = null;
     var linesSrc = null;
     var layer = null;
@@ -436,6 +567,15 @@ var UTAMods = (function () {
           return unsubscribe(hooks.time, cb);
         }
       },
+      // Folia 新版写法：ctx.currentTime.get() / .on('change', cb)
+      currentTime: {
+        get: function () { return stateRef.time; },
+        on: function (event, cb) {
+          if (event !== 'change' || typeof cb !== 'function') return function () {};
+          hooks.time.push(cb);
+          return unsubscribe(hooks.time, cb);
+        }
+      },
       // 兼容直接使用 ctx.onLyricTime 的模组（Folia 公开契约的两种写法）
       onLyricTime: function (cb) {
         hooks.time.push(cb);
@@ -444,8 +584,8 @@ var UTAMods = (function () {
       getDuration: function () { return stateRef.duration; },
       getLineIndex: function () { return stateRef.index; },
       isPaused: function () { return stateRef.paused; },
-      getTheme: function () { return stateRef.theme; },
-      getSubtitleTheme: function () { return stateRef.theme; },
+      getTheme: function () { return stateRef.theme || fallbackTheme(); },
+      getSubtitleTheme: function () { return stateRef.theme || fallbackTheme(); },
       getCoverUrl: function () { return stateRef.coverUrl; },
       getDisplay: function () { return display; },
       getSettings: function () { return mod.settings; },
@@ -488,6 +628,18 @@ var UTAMods = (function () {
               .catch(function (e) { guard(function () { throw e; }, 'async mount'); });
           }
         }, 'mount');
+
+        // 挂载后立刻把容器的真实尺寸告诉模组（模组此时已订阅 onResize）
+        guard(function () {
+          var w = box.clientWidth;
+          var h = box.clientHeight;
+          if (!w || !h) return;
+          size.w = w;
+          size.h = h;
+          stateRef.width = w;
+          stateRef.height = h;
+          for (var i = 0; i < hooks.resize.length; i++) hooks.resize[i]({ width: w, height: h });
+        }, 'initial resize');
       },
 
       update: function (dt, s) {
@@ -503,8 +655,19 @@ var UTAMods = (function () {
           stateRef.lines = projectLines(s.lines);
         }
         stateRef.paused = !!s.paused;
-        stateRef.width = s.width;
-        stateRef.height = s.height;
+        // 歌词演出层不一定会传 width/height，缺省时沿用上一次（或挂载时量到的）尺寸
+        var nextW = s.width != null ? (+s.width || 0) : size.w;
+        var nextH = s.height != null ? (+s.height || 0) : size.h;
+        if (nextW !== size.w || nextH !== size.h) {
+          size.w = nextW;
+          size.h = nextH;
+          stateRef.width = nextW;
+          stateRef.height = nextH;
+          for (var r = 0; r < hooks.resize.length; r++) guard(function () { hooks.resize[r]({ width: nextW, height: nextH }); }, 'resize');
+        } else {
+          stateRef.width = nextW;
+          stateRef.height = nextH;
+        }
         if (themeSrc !== s.theme) {
           themeSrc = s.theme;
           stateRef.theme = mapTheme(s.theme);
@@ -532,7 +695,9 @@ var UTAMods = (function () {
         if (disposed) return;
         stateRef.width = w;
         stateRef.height = h;
-        for (var i = 0; i < hooks.resize.length; i++) guard(function () { hooks.resize[i](w, h); }, 'resize');
+        size.w = +w || 0;
+        size.h = +h || 0;
+        for (var i = 0; i < hooks.resize.length; i++) guard(function () { hooks.resize[i]({ width: w, height: h }); }, 'resize');
       },
 
       dispose: function () {

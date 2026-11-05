@@ -352,6 +352,40 @@ var LyricTunings = (function () {
     modeDefaults[id] = defaultsFor(MODE_SCHEMAS[id]);
   });
 
+  // 模组注册的附加参数（如 k3panel 给商籁加的倍率），按 modeId → groupId 存放
+  var EXTERNAL = {};
+
+  function combinedSchema(modeId) {
+    var base = MODE_SCHEMAS[modeId] || [];
+    var ext = EXTERNAL[modeId];
+    if (!ext) return base.length ? base : null;
+    var out = base.slice();
+    Object.keys(ext).forEach(function (id) { out.push(ext[id]); });
+    return out;
+  }
+
+  function rebuildDefaults(modeId) {
+    var schema = combinedSchema(modeId);
+    if (!schema) { delete modeDefaults[modeId]; return; }
+    modeDefaults[modeId] = defaultsFor(schema);
+  }
+
+  function registerExternal(modeId, groupId, group) {
+    if (!modeId || !groupId || !group) return;
+    if (!EXTERNAL[modeId]) EXTERNAL[modeId] = {};
+    EXTERNAL[modeId][groupId] = group;
+    rebuildDefaults(modeId);
+    bump(modeId);
+  }
+
+  function unregisterExternal(modeId, groupId) {
+    if (!EXTERNAL[modeId] || !EXTERNAL[modeId][groupId]) return;
+    delete EXTERNAL[modeId][groupId];
+    if (!Object.keys(EXTERNAL[modeId]).length) delete EXTERNAL[modeId];
+    rebuildDefaults(modeId);
+    bump(modeId);
+  }
+
   function getCommon() {
     var out = {};
     COMMON_SCHEMA.forEach(function (f) {
@@ -392,7 +426,7 @@ var LyricTunings = (function () {
     var def = modeDefaults[modeId];
     if (!def) return;
     var field = null;
-    (MODE_SCHEMAS[modeId] || []).forEach(function (section) {
+    (combinedSchema(modeId) || []).forEach(function (section) {
       (section.fields || []).forEach(function (f) { if (f.key === key) field = f; });
     });
     if (!field || field.type === 'action') return;
@@ -422,11 +456,11 @@ var LyricTunings = (function () {
   }
 
   function schemaFor(modeId) {
-    return MODE_SCHEMAS[modeId] || null;
+    return combinedSchema(modeId);
   }
 
   function hasMode(modeId) {
-    return !!MODE_SCHEMAS[modeId];
+    return !!combinedSchema(modeId);
   }
 
   return {
@@ -439,6 +473,8 @@ var LyricTunings = (function () {
     set: set,
     reset: reset,
     onChange: onChange,
+    registerExternal: registerExternal,
+    unregisterExternal: unregisterExternal,
     fontStack: fontStack,
     version: function (modeId) { return versions[modeId] || 0; }
   };

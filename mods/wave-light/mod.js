@@ -806,9 +806,12 @@ function mountWaveLight(folium, container, ctx) {
     const offFrame = ctx.onFrame(onFrame);
 
     // ---- subscriptions -----------------------------------------------------
-    const offResize = ctx.onResize((w, h) => {
+    const offResize = ctx.onResize((size, h) => {
+        // 兼容两种回调签名：(w, h) 与 Folia 的 ({ width, height })
+        const w = typeof size === 'number' ? size : (size && size.width) || 0;
+        const hh = typeof size === 'number' ? h : (size && size.height) || 0;
         width = Math.max(1, w);
-        height = Math.max(1, h);
+        height = Math.max(1, hh);
         refreshAll(false);
     });
 
