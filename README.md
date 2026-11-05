@@ -58,27 +58,70 @@ MusicTap 是一个纯前端、无构建的网页音画作品：点击或拖拽�
 
 用浏览器打开 `index.html` 即可体验点击演奏（无需联网，无需构建）。
 
-### 方式二：本地服务器（推荐）
+### 方式二：本机启动
+
+在仓库根目录执行（任意静态服务器都可以）：
 
 ```bash
 python -m http.server 8080
-# 浏览器访问 http://localhost:8080/
+# 或：npx http-server . -p 8080
 ```
+
+浏览器访问 <http://localhost:8080/>。
+
+### 方式三：局域网启动（手机 / 另一台电脑访问）
+
+手机调试推荐用这条命令，让静态服务监听所有网卡：
+
+```bash
+python -m http.server 8080 --bind 0.0.0.0
+```
+
+1. 查本机局域网 IP
+   - Windows：`ipconfig`，看「无线局域网适配器 WLAN → IPv4 地址」
+   - macOS / Linux：`ifconfig` 或 `ip addr`，看 `192.168.x.x` / `10.x.x.x`
+2. 手机与电脑连同一个 Wi-Fi
+3. 手机浏览器打开 `http://<电脑IP>:8080/`，例如 `http://192.168.1.8:8080/`
+
+注意事项：
+
+- Windows 首次启动会弹防火墙提示，勾选「专用网络」并允许访问
+- 打不开时先确认命令里带了 `--bind 0.0.0.0`，再用手机访问同一 IP 的 8080 端口验证
+- 路由器开启「AP 隔离 / 访客网络」时，同一 Wi-Fi 下的设备也互相不可见，需要关闭该选项
+- 手机端会自动进入响应式布局：播放器右侧控制栏变成底部抽屉（「控制」按钮打开），设置卡片导航变横向
 
 ### 可选：启用网易云在线曲库
 
-播放器通过本地 [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) 访问网易云接口，默认地址 `http://localhost:3000`：
+播放器通过 [NeteaseCloudMusicApi](https://github.com/Binaryify/NeteaseCloudMusicApi) 访问网易云接口：
 
 ```bash
 git clone https://github.com/Binaryify/NeteaseCloudMusicApi.git
 cd NeteaseCloudMusicApi
 npm install
-node app.js
+node app.js        # 监听 0.0.0.0:3000
 ```
 
 启动后在页面打开「网易云播放器 → 扫码登录」，即可搜索、加载歌单与歌词。
 
-- 若后端端口不是 3000，修改 `js/netease.js` 顶部的 `API_BASE`
+前端会自动把接口地址解析为「当前页面主机名 + `:3000`」：
+
+| 访问方式 | 实际请求的接口 |
+| --- | --- |
+| `http://localhost:8080/` | `http://localhost:3000` |
+| `http://192.168.1.8:8080/`（手机） | `http://192.168.1.8:3000` |
+
+需要自定义时，用两种方式之一覆盖（优先级从高到低）：
+
+```text
+http://192.168.1.8:8080/?api=http://192.168.1.8:3000      # 单次生效
+localStorage.setItem('uta.apiBase', 'http://192.168.1.8:3000')  # 长期生效
+```
+
+其他提示：
+
+- 手机访问时后端也必须监听 `0.0.0.0`，并在防火墙放行 3000 端口
+- 页面用 HTTPS 打开（如 GitHub Pages）时，浏览器会拦截 `http://` 接口，需要给后端配 HTTPS
+- 若控制台报 CORS 错误，给后端加跨域头，或按「自有服务器」一节用同源反向代理 + `?api=/api`
 - 播放器需要浏览器允许自动播放（首次点击页面后才会有声音）
 - 未启动后端时，点击演奏、背景与歌词演出等离线功能不受影响
 
@@ -146,13 +189,44 @@ MusicTap/
 
 ## 部署
 
-仓库根目录即静态站点，可直接启用 GitHub Pages：
+### GitHub Pages（公网静态站点）
 
 1. Settings → Pages → Source 选择 `Deploy from a branch`
 2. Branch 选 `main`，目录选 `/ (root)`
 3. 打开 Pages 给出的地址即可
 
-网易云功能需要自行部署后端并把 `js/netease.js` 中的 `API_BASE` 指向它（或使用同源反向代理）。
+Pages 走 HTTPS，网易云接口必须同样是 HTTPS，否则会被浏览器拦截。
+
+### 局域网（另一台电脑 / 手机）
+
+```bash
+# 在仓库根目录
+python -m http.server 8080 --bind 0.0.0.0
+```
+
+- 同一 Wi-Fi 的设备访问 `http://<本机IP>:8080/`
+- 需要在线曲库时，`NeteaseCloudMusicApi` 也要监听 `0.0.0.0:3000`
+- 前端会自动用「页面主机名 + :3000」请求接口，无需改代码；特殊情况用 `?api=` 覆盖
+
+### 自有服务器
+
+把仓库根目录整个上传到任意静态托管（Nginx / Caddy / OSS / Vercel 均可），示例 Nginx：
+
+```nginx
+server {
+    listen 80;
+    server_name music.example.com;
+    root /var/www/MusicTap;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:3000/;
+        proxy_set_header Host $host;
+    }
+}
+```
+
+同源反向代理后，用 `?api=/api` 让前端走代理即可。
 
 ## 已知限制
 

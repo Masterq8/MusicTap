@@ -1,7 +1,10 @@
 /**
  * netease.js — 网易云音乐 BGM 集成
  * ===================================
- * 依赖：本地 NeteaseCloudMusicApi 后端（默认 http://localhost:3000）
+ * 依赖：NeteaseCloudMusicApi 后端（默认同主机的 3000 端口）
+ * 地址解析顺序：?api= 参数 > localStorage['uta.apiBase'] > 页面主机名:3000
+ *   本机访问 → http://localhost:3000
+ *   局域网 / 手机访问 → http://<电脑局域网 IP>:3000
  * 功能：
  *   1) 二维码登录（login/qr/key → create → check 轮询）
  *   2) 登录后获取每日推荐 / 播放歌曲
@@ -11,7 +14,21 @@
 (function (global) {
   'use strict';
 
-  var API_BASE = 'http://localhost:3000';
+  function resolveApiBase() {
+    var fromQuery = /[?&]api=([^&]+)/.exec(location.search);
+    if (fromQuery) {
+      try { return decodeURIComponent(fromQuery[1]).replace(/\/+$/, ''); } catch (e) { /* 参数非法则继续回退 */ }
+    }
+    try {
+      var saved = localStorage.getItem('uta.apiBase');
+      if (saved) return saved.replace(/\/+$/, '');
+    } catch (e) { /* 隐私模式下忽略 */ }
+    // 局域网访问时，localhost 指向手机自身，必须跟随页面主机名
+    if (location.protocol === 'file:') return 'http://localhost:3000';
+    return location.protocol + '//' + (location.hostname || 'localhost') + ':3000';
+  }
+
+  var API_BASE = resolveApiBase();
 
   function NeteaseBgm() {
     this.cookie = localStorage.getItem('netease_cookie') || '';
