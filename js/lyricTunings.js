@@ -46,8 +46,8 @@ var LyricTunings = (function () {
         title: '云阶参数', fields: [
           { key: 'guide', type: 'boolean', label: '引导线', defaultValue: true },
           { key: 'semantic', type: 'boolean', label: '语义排列', defaultValue: true },
-          { key: 'offsetMin', type: 'number', label: '错位最小值', min: 0, max: 24, step: 1, defaultValue: 4 },
-          { key: 'offsetMax', type: 'number', label: '错位最大值', min: 0, max: 36, step: 1, defaultValue: 14 }
+          { key: 'offsetMin', type: 'number', label: '错位最小值', min: 0, max: 180, step: 1, defaultValue: 20 },
+          { key: 'offsetMax', type: 'number', label: '错位最大值', min: 0, max: 180, step: 1, defaultValue: 80 }
         ]
       }
     ],
@@ -86,8 +86,8 @@ var LyricTunings = (function () {
       {
         title: '倾诉参数', fields: [
           { key: 'colorMode', type: 'select', label: '配色方案', defaultValue: 'duo', options: [{ value: 'duo', label: '主题双色' }, { value: 'mono', label: '单色' }, { value: 'gradient', label: '渐变' }] },
-          { key: 'breakChance', type: 'number', label: '分行概率', min: 0, max: 1, step: 0.05, defaultValue: 0.25 },
-          { key: 'italicChance', type: 'number', label: '斜体强调概率', min: 0, max: 1, step: 0.05, defaultValue: 0.2 }
+          { key: 'breakChance', type: 'number', label: '分行概率', min: 0, max: 1, step: 0.05, defaultValue: 0.75 },
+          { key: 'italicChance', type: 'number', label: '斜体强调概率', min: 0, max: 1, step: 0.05, defaultValue: 0.35 }
         ]
       }
     ],
@@ -144,8 +144,8 @@ var LyricTunings = (function () {
         title: '回环参数', fields: [
           { key: 'focusScale', type: 'number', label: '主歌词放大倍率', min: 1, max: 1.8, step: 0.05, defaultValue: 1.25 },
           { key: 'radius', type: 'number', label: '轨道半径', min: 0.2, max: 0.55, step: 0.01, defaultValue: 0.42 },
-          { key: 'tilt', type: 'number', label: '轨道倾斜度', min: -30, max: 0, step: 1, defaultValue: -16 },
-          { key: 'letterGap', type: 'number', label: '字符间距', min: 0, max: 12, step: 0.5, defaultValue: 3 },
+          { key: 'tilt', type: 'number', label: '轨道倾斜度', min: -90, max: 90, step: 1, defaultValue: 45 },
+          { key: 'letterGap', type: 'number', label: '字符间距', min: 0, max: 12, step: 0.5, defaultValue: 0 },
           { key: 'axis', type: 'boolean', label: '中间轴线', defaultValue: true }
         ]
       }
@@ -186,10 +186,10 @@ var LyricTunings = (function () {
     'folia-pendolo': [
       {
         title: '轮盘与刻度', fields: [
-          { key: 'wheelX', type: 'number', label: '轮盘水平位置', min: 0, max: 100, step: 1, defaultValue: 50 },
-          { key: 'wheelR', type: 'number', label: '轮盘半径', min: 0.12, max: 0.35, step: 0.01, defaultValue: 0.2 },
-          { key: 'arc', type: 'number', label: '弧度角度', min: 120, max: 360, step: 10, defaultValue: 300 },
-          { key: 'focusScale', type: 'number', label: '聚焦句缩放', min: 1, max: 1.8, step: 0.05, defaultValue: 1 },
+          { key: 'wheelX', type: 'number', label: '轮盘水平位置', min: 0, max: 100, step: 1, defaultValue: 0 },
+          { key: 'wheelR', type: 'number', label: '轮盘半径', min: 0.12, max: 0.35, step: 0.01, defaultValue: 0.3 },
+          { key: 'arc', type: 'number', label: '弧度角度', min: 40, max: 160, step: 10, defaultValue: 100 },
+          { key: 'focusScale', type: 'number', label: '聚焦句缩放', min: 1, max: 1.8, step: 0.05, defaultValue: 1.25 },
           { key: 'escapement', type: 'number', label: '擒纵咬合力度', min: 0, max: 1, step: 0.05, defaultValue: 0.4 }
         ]
       },
