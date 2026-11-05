@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+output/
+
+# 本地数据 / 日志
+www/data/
+*.log
+
+# 编辑器与系统文件
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
