@@ -1,8 +1,9 @@
 /**
- * builtinLyricModes.js — Folia 风格内置歌词演出模式（独立实现）
+ * builtinLyricModes.js — Folia 风格内置歌词演出模式
  * ============================================================
- * 参考 Folia 内置模式的观感与命名，用 uta-tap 自己的 DOM/Canvas 实现重写，
- * 不复制 Folia 源码（Folia 为 AGPL-3.0）。
+ * 按 Folia（AGPL-3.0）内置模式的源码规格逐个重写：构图、字号/颜色、
+ * 时间线与动效参数对齐其实现，渲染层换成 uta-tap 自己的 DOM/Canvas。
+ * 如果对外分发，请一并遵守 Folia 的 AGPL-3.0 许可。
  *
  * 歌词演出（只覆盖文字层）：
  *   静止 still / 流光 stream / 心象 cadenza / 云阶 partita / 群唱 cappella / 倾诉 tilt
