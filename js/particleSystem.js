@@ -24,6 +24,20 @@ var ParticleSystem = function (container, theme) {
   this.graphics = new PIXI.Graphics();
   container.addChild(this.graphics);
 
+  // 粒子本体合批：ParticleContainer + 径向柔光纹理（tint 上色）。
+  // 拖尾（变宽线段）与粒子间连线仍走 Graphics——sprite 表达不了。
+  // spriteBodies = false（默认）：纯 Graphics 绘制（锐利核心 + 极淡光晕）。
+  // 柔光纹理方案观感糊化（渐变尾比原 12% 光晕强，爆发重叠成雾且寿命期不散），
+  // 20261109e 回退；代码保留，需要时改 true 实验合批渲染。
+  this.spriteBodies = false;
+  this.bodyTexture = ParticleSystem._makeBodyTexture();
+  this.pcontainer = new PIXI.ParticleContainer(PARTICLE_MAX, { position: true, tint: true }, 16384, true);
+  this.pcontainer.interactive = false;
+  this.pcontainer.interactiveChildren = false;
+  container.addChild(this.pcontainer); // graphics 之后：本体盖在拖尾之上
+  this.sprites = [];   // 池：只增不减，上限 PARTICLE_MAX
+  this._spriteCount = 0; // 本帧渲染游标
+
   this.metaballSprite = null;
   this.metaball = null;
   try {
@@ -71,6 +85,24 @@ var ParticleSystem = function (container, theme) {
 
   this.flowField = new FlowField();
   this.meshReformer = new MeshReformer();
+};
+
+/**
+ * 粒子本体纹理：64×64 径向柔光圆。核心（约 45% 半径内）近实心，
+ * 外缘渐隐——把原先「实心圆 + halo×2」两层 drawCircle 的观感烘焙进一张纹理。
+ */
+ParticleSystem._makeBodyTexture = function () {
+  var cv = document.createElement('canvas');
+  cv.width = cv.height = 64;
+  var ctx = cv.getContext('2d');
+  var grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.4, 'rgba(255,255,255,0.95)');
+  grad.addColorStop(0.62, 'rgba(255,255,255,0.45)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return PIXI.Texture.from(cv);
 };
 
 ParticleSystem.prototype.resize = function (w, h) {
@@ -123,10 +155,13 @@ ParticleSystem.prototype.setReducedMotion = function (v) {
   this.reducedMotion = !!v;
 };
 
-ParticleSystem.prototype.emit = function (x, y) {
+ParticleSystem.prototype.emit = function (x, y, strength) {
   if (!this.effects.particles) return;
   var room = PARTICLE_MAX - this.particles.length;
   if (room <= 0) return;
+
+  // 输入指纹：strength（拖拽力度 0.55–1.0，点击 1）影响粒子大小与亮度
+  var boost = strength == null ? 1 : Math.max(0.5, Math.min(1.5, strength));
 
   var requested = Math.floor(this.params.density * 10 * (this.reducedMotion ? 0.4 : 1));
   var count = Math.min(requested, room);
@@ -146,14 +181,15 @@ ParticleSystem.prototype.emit = function (x, y) {
     p.vy = Math.sin(angle) * speed;
     p.life = life;
     p.maxLife = life;
-    p.baseSize = Math.random() * 4 + 2;
+    p.baseSize = (Math.random() * 4 + 2) * (0.65 + 0.35 * boost);
     p.size = p.baseSize;
     p.color = this.theme.particles[Math.floor(Math.random() * this.theme.particles.length)];
-    p.alpha = 1;
+    p.alpha = 0.55 + 0.45 * boost;
     p.active = true;
     p.targetColor = undefined;
     p.colorT = undefined;
     p.meshFrom = undefined;
+    p.meshDelay = 0;
     p.meshTo = undefined;
     p.consumed = false;
     p.ambient = false;
@@ -192,6 +228,7 @@ ParticleSystem.prototype.emitAmbient = function (x, y, energy) {
   p.targetColor = undefined;
   p.colorT = undefined;
   p.meshFrom = undefined;
+  p.meshDelay = 0;
   p.meshTo = undefined;
   p.consumed = false;
   p.ambient = true;
@@ -219,6 +256,7 @@ ParticleSystem.prototype.triggerMesh = function (pattern) {
   for (var j = 0; j < active.length; j++) {
     active[j].meshFrom = { x: active[j].x, y: active[j].y };
     active[j].meshTo = assigned[j];
+    active[j].meshDelay = assigned[j].delay || 0; // 错峰：近的先飞
   }
   this._releaseApplied = false;
 };
@@ -248,11 +286,15 @@ ParticleSystem.prototype.update = function (dt) {
   var g = this.graphics;
   g.clear();
   this.metaBuf.length = 0;
+  this._spriteCount = 0; // 本帧 sprite 渲染游标归零
 
   var useMeta = this.effects.metaball && !!this.metaballSprite;
   var arr = this.particles;
   // 高密度下省掉额外辉光圈，把预算留给主体和拖尾
   this._dense = arr.length > 900;
+
+  // 星座连线：hold 阶段 200ms 淡入，画在粒子之下（星团的说服力在连线上）
+  if (meshOn && phase === 'hold') this.drawMeshLinks(g);
 
   for (var i = 0; i < arr.length; i++) {
     var p = arr[i];
@@ -261,7 +303,7 @@ ParticleSystem.prototype.update = function (dt) {
 
     if (meshOn && p.meshTo && p.meshFrom) {
       if (phase === 'flyin') {
-        var e = this.meshReformer.getProgress();
+        var e = this.meshReformer.getFlyProgress(p.meshDelay);
         p.x = p.meshFrom.x + (p.meshTo.x - p.meshFrom.x) * e;
         p.y = p.meshFrom.y + (p.meshTo.y - p.meshFrom.y) * e;
         p.vx = 0;
@@ -333,12 +375,15 @@ ParticleSystem.prototype.update = function (dt) {
   }
 
   if (useLinks) this.drawLinks();
+  // 帧尾：隐藏本帧未用到的 sprite（粒子死亡/禁用/metaball 模式）
+  for (var k = this._spriteCount; k < this.sprites.length; k++) this.sprites[k].visible = false;
   this.renderMetaball();
   this.compact();
 };
 
 ParticleSystem.prototype.drawParticle = function (p) {
   var g = this.graphics;
+  // 拖尾：变宽线段，必须留在 Graphics
   if (this.effects.trail && p.alpha > 0.25 && p.size > 2) {
     var trailA = p.alpha * Math.max(0.08, (this.params.trailAlpha || 0.15) * 2);
     g.lineStyle(Math.max(0.8, p.size * 0.9), p.color, trailA);
@@ -346,13 +391,31 @@ ParticleSystem.prototype.drawParticle = function (p) {
     g.lineTo(p.x, p.y);
     g.lineStyle(0);
   }
-  g.beginFill(p.color, p.alpha);
-  g.drawCircle(p.x, p.y, p.size);
-  g.endFill();
-  if (!this._dense && p.size > 3.2) {
-    g.beginFill(p.color, p.alpha * 0.12);
-    g.drawCircle(p.x, p.y, p.size * 2);
+  if (this.spriteBodies && this.pcontainer) {
+    // 本体：合批 sprite（纹理 64px，可见核心约 14px 半径 → 逻辑 size 的缩放）
+    var sp = this.sprites[this._spriteCount];
+    if (!sp) {
+      sp = new PIXI.Sprite(this.bodyTexture);
+      sp.anchor.set(0.5);
+      this.sprites.push(sp);
+      this.pcontainer.addChild(sp);
+    }
+    this._spriteCount++;
+    sp.visible = true;
+    sp.x = p.x;
+    sp.y = p.y;
+    sp.tint = p.color;
+    sp.alpha = p.alpha;
+    sp.scale.set(p.size / 14);
+  } else {
+    g.beginFill(p.color, p.alpha);
+    g.drawCircle(p.x, p.y, p.size);
     g.endFill();
+    if (!this._dense && p.size > 3.2) {
+      g.beginFill(p.color, p.alpha * 0.12);
+      g.drawCircle(p.x, p.y, p.size * 2);
+      g.endFill();
+    }
   }
 };
 
@@ -553,6 +616,32 @@ ParticleSystem.prototype.renderMetaball = function () {
   sprite.visible = true;
 };
 
+/* ---------------- Mesh 星座连线 ---------------- */
+
+/** hold 阶段：目标点之间按最近邻连线，200ms 淡入，垫在粒子之下 */
+ParticleSystem.prototype.drawMeshLinks = function (g) {
+  var mr = this.meshReformer;
+  if (!mr || !mr.links || mr.links.length === 0) return;
+  var targets = mr.targets;
+  if (!targets || targets.length === 0) return;
+
+  var fadeIn = Math.min(1, mr.getElapsedInPhase() / 0.2);
+  var alpha = 0.18 * fadeIn;
+  if (alpha <= 0.01) return;
+
+  var color = this.theme && this.theme.particles && this.theme.particles[0];
+  if (color == null) color = 0xffffff;
+  g.lineStyle(1, color, alpha);
+  for (var i = 0; i < mr.links.length; i++) {
+    var a = targets[mr.links[i][0]];
+    var b = targets[mr.links[i][1]];
+    if (!a || !b) continue;
+    g.moveTo(a.x, a.y);
+    g.lineTo(b.x, b.y);
+  }
+  g.lineStyle(0, 0, 0); // 还原线宽，不影响后续粒子绘制
+};
+
 /* ---------------- Mesh 释放 ---------------- */
 
 ParticleSystem.prototype.applyMeshRelease = function () {
@@ -569,6 +658,7 @@ ParticleSystem.prototype.applyMeshRelease = function () {
     p.vy = (dy / d) * speed + (Math.random() - 0.5) * 2;
     p.meshTo = undefined;
     p.meshFrom = undefined;
+    p.meshDelay = 0;
   }
 };
 
@@ -602,6 +692,7 @@ ParticleSystem.prototype.compact = function () {
       arr[write++] = p;
     } else {
       p.meshFrom = undefined;
+    p.meshDelay = 0;
       p.meshTo = undefined;
       this.pool.push(p);
     }

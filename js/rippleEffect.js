@@ -37,9 +37,9 @@ RippleEffect.prototype.setEnabled = function (v) {
   if (!this.enabled) this.graphics.clear();
 };
 
-RippleEffect.prototype.emit = function (x, y) {
+RippleEffect.prototype.emit = function (x, y, scale) {
   if (!this.enabled) return;
-  var maxR = Math.min(this.width, this.height) * 0.35;
+  var maxR = Math.min(this.width, this.height) * 0.35 * (scale == null ? 1 : scale);
   // 拖拽洪水保护
   if (this.ripples.length > 36) this.ripples.shift();
   this.ripples.push({

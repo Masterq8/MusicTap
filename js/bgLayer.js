@@ -1,23 +1,24 @@
 /**
- * bgLayer.js — 星海共振 · 背景系统（参考 folia-major 的背景语言重做）
+ * bgLayer.js — 星海共振 · 背景系统
  * ====================================================================
- * 6 种背景，均位于渲染树最底层，不拦截任何输入：
+ * 4 种背景，均位于渲染树最底层，不拦截任何输入：
  *
- *   common  通用   模糊封面 + 主题渐变叠色 + 15 个几何图形漂浮 + 上升微粒 + 暗角
- *   latent  隐现   封面取色 MeshGradient 流体 + 4x4 抖动像素层，随音频起伏（可单层/混合）
- *   monet   莫奈   封面/自定义图铺满，全屏叠色或半屏渐变，模糊 + 偏移 + 漂移 + 水洗
- *   nomand  漫游   封面/自定义图加 Paper 纸感：像素化 / 网点 / 纸纹
- *   sora    空     一片缓缓横移的星空，最干净的画面
- *   url     嵌入   把任意网页作为背景（iframe 置于 canvas 之下）
+ *   common  通用   主题色星云光斑漂浮（星星由全局 ParallaxStarfield 绘制）
+ *   nebula  星云   哈勃船底座星云壁纸，缓慢漂移（不随音乐动）
+ *   aurora  极光   ISS 南极光壁纸，缓慢漂移（不随音乐动）
+ *   warp    穿梭   向镜头飞来的星海（速度线）
  *
- * 依赖：PIXI v6（本地 vendor）。纹理全部程序化生成，断网可用。
+ * 设计原则：背景是壁纸，不是伴舞——除「穿梭」的速度线外一律不响应音频，
+ * 只做极缓慢的 Ken Burns 漂移，永远不与中心星抢焦点。
+ *
+ * 依赖：PIXI v6（本地 vendor）。壁纸图为 NASA 公版素材（img/ 目录，本地打包）。
  *
  * 接口：
  *   var bg = new BgLayer();
  *   bg.init({ stage, renderer, container, themeId }, { getTheme });
- *   bg.setMode('common'); bg.setParam('common', 'shapes', 18);
+ *   bg.setMode('common'); bg.setParam('common', 'glow', 0.6);
  *   bg.retheme('nebula'); bg.setCustomTheme(themeObj);
- *   bg.setCover(coverUrl);            // 歌曲封面（通用/莫奈/漫游 取图，隐现取色）
+ *   bg.setCover(coverUrl);            // 封面（当前模式均不用图，保留接口）
  *   bg.tick(dt, spectrumData);
  *   bg.destroy();
  */
@@ -86,6 +87,28 @@
     var rgb = hslToRgb(hsl.h, clamp(hsl.s * sMul, 0, 1), clamp(hsl.l + (lAdd || 0), 0, 1));
     return num(rgb.r, rgb.g, rgb.b);
   }
+
+  /**
+   * 星海专用冷色调色板：背景一律围绕中心星的青蓝走，不跟随封面的绿色/暖色，
+   * 避免「青蓝星核 + 翠绿星云」这类打架配色。
+   *   主题色本身在青→蓝紫区间时沿用其色相，否则回落到青色。
+   */
+  function cosmicPalette(primary) {
+    var c = channel(primary);
+    var h = rgbToHsl(c.r, c.g, c.b).h;
+    if (!(h >= 0.44 && h <= 0.82)) h = 0.52;
+    h = clamp(h, 0.48, 0.60);
+    return {
+      cyan: num2(hslToRgb(h, 0.86, 0.66)),          // 亮青（帘幕底缘 / 流星尾）
+      gas: num2(hslToRgb(h + 0.05, 0.80, 0.50)),     // 星云主气
+      deep: num2(hslToRgb(h + 0.11, 0.88, 0.36)),    // 深蓝
+      violet: num2(hslToRgb(0.74, 0.60, 0.40)),      // 紫罗兰暗尘
+      magenta: num2(hslToRgb(0.84, 0.66, 0.54)),     // 极光顶缘紫红
+      white: 0xf2fbff                                 // 亮核
+    };
+  }
+
+  function num2(rgb) { return num(rgb.r, rgb.g, rgb.b); }
 
   function toUniform(color) {
     return [(color >> 16 & 255) / 255, (color >> 8 & 255) / 255, (color & 255) / 255];
@@ -174,22 +197,6 @@
     });
   }
 
-  function verticalFadeTexture(color, w, h) {
-    var key = 'vf' + color + '_' + w + 'x' + h;
-    return cacheTex(key, function () {
-      var cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      var ctx = cv.getContext('2d');
-      var g = ctx.createLinearGradient(0, 0, 0, h);
-      g.addColorStop(0, rgbaCss(color, 1));
-      g.addColorStop(0.5, rgbaCss(color, 0.6));
-      g.addColorStop(1, rgbaCss(color, 0));
-      ctx.fillStyle = g;
-      ctx.fillRect(0, 0, w, h);
-      return PIXI.Texture.from(cv);
-    });
-  }
-
   function clearTextureCache() {
     Object.keys(TEX_CACHE).forEach(function (k) {
       try { TEX_CACHE[k].destroy(true); } catch (e) { /* 忽略 */ }
@@ -198,199 +205,38 @@
   }
 
   /* ============================================================
-   * 三、着色器
+   * 三、滤镜（光晕波浪）
    * ============================================================ */
 
-  // 隐现·流体层：6 色 mesh gradient（域扭曲 + 旋涡）
-  var MESH_FRAG = [
+  // 光晕波浪：只作用于画面亮部（星云辉光 / 极光光带）——亮部做缓慢的
+  // 斜向行波折射 + 亮度呼吸，暗部（星空 / 深空）保持绝对稳定。
+  // 纯时间驱动，不随音频——背景依然是壁纸，只是光在「活着」。
+  var GLOW_WAVE_FRAG = [
     'precision mediump float;',
     'varying vec2 vTextureCoord;',
+    'uniform sampler2D uSampler;',
     'uniform float uTime;',
-    'uniform float uSpeed;',
-    'uniform float uDistortion;',
-    'uniform float uSwirl;',
-    'uniform vec3 uC0;',
-    'uniform vec3 uC1;',
-    'uniform vec3 uC2;',
-    'uniform vec3 uC3;',
-    'uniform vec3 uC4;',
-    'uniform vec3 uC5;',
-    'vec2 warp(vec2 p, float t) {',
-    '  float n = sin(p.x * 3.1 + t * 0.72) * sin(p.y * 2.7 - t * 0.51);',
-    '  p += vec2(n * 0.055, n * 0.045) * uDistortion;',
-    '  p += 0.03 * uSwirl * vec2(sin(p.y * 4.2 + t * 1.1), cos(p.x * 4.2 - t * 0.9));',
-    '  return p;',
-    '}',
+    'uniform float uWave;',
+    'uniform float uGlow;',
     'void main(void) {',
-    '  float t = uTime * uSpeed;',
-    '  vec2 uv = warp(vTextureCoord, t);',
-    '  vec3 acc = vec3(0.0);',
-    '  float wsum = 0.0;',
-    '  vec2 c0 = vec2(0.50 + 0.38 * sin(t * 0.33 + 0.0), 0.50 + 0.34 * cos(t * 0.27 + 1.1));',
-    '  vec2 c1 = vec2(0.50 + 0.40 * sin(t * 0.29 + 2.1), 0.50 + 0.36 * cos(t * 0.31 + 3.4));',
-    '  vec2 c2 = vec2(0.50 + 0.36 * sin(t * 0.37 + 4.2), 0.50 + 0.40 * cos(t * 0.23 + 5.0));',
-    '  vec2 c3 = vec2(0.50 + 0.42 * sin(t * 0.25 + 1.4), 0.50 + 0.32 * cos(t * 0.35 + 2.6));',
-    '  vec2 c4 = vec2(0.50 + 0.34 * sin(t * 0.41 + 3.1), 0.50 + 0.38 * cos(t * 0.28 + 4.4));',
-    '  vec2 c5 = vec2(0.50 + 0.38 * sin(t * 0.31 + 5.6), 0.50 + 0.36 * cos(t * 0.39 + 0.7));',
-    '  float w0 = 1.0 / (dot(uv - c0, uv - c0) + 0.05); acc += uC0 * w0; wsum += w0;',
-    '  float w1 = 1.0 / (dot(uv - c1, uv - c1) + 0.05); acc += uC1 * w1; wsum += w1;',
-    '  float w2 = 1.0 / (dot(uv - c2, uv - c2) + 0.05); acc += uC2 * w2; wsum += w2;',
-    '  float w3 = 1.0 / (dot(uv - c3, uv - c3) + 0.05); acc += uC3 * w3; wsum += w3;',
-    '  float w4 = 1.0 / (dot(uv - c4, uv - c4) + 0.05); acc += uC4 * w4; wsum += w4;',
-    '  float w5 = 1.0 / (dot(uv - c5, uv - c5) + 0.05); acc += uC5 * w5; wsum += w5;',
-    '  vec3 col = acc / wsum;',
-    '  float vig = smoothstep(1.35, 0.15, length(vTextureCoord - 0.5) * 1.6);',
-    '  gl_FragColor = vec4(col * (0.72 + 0.28 * vig), 1.0);',
-    '}'
-  ].join('\n');
-
-  // 隐现·像素层：4x4 有序抖动 + warp 形状
-  var DITHER_FRAG = [
-    'precision mediump float;',
-    'varying vec2 vTextureCoord;',
-    'uniform float uTime;',
-    'uniform float uSpeed;',
-    'uniform float uSize;',
-    'uniform vec3 uBack;',
-    'uniform vec3 uFront;',
-    'float bayer2(vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }',
-    'float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }',
-    'void main(void) {',
-    '  float t = uTime * uSpeed;',
-    '  vec2 p = vTextureCoord * 3.0;',
-    '  float f = 0.5 + 0.30 * sin(p.x * 2.2 + t * 0.9) * sin(p.y * 1.8 - t * 0.7)',
-    '              + 0.16 * sin((p.x + p.y) * 3.4 + t * 1.3);',
-    '  float d = bayer4(gl_FragCoord.xy / max(uSize, 1.0));',
-    '  float v = step(d, clamp(f, 0.0, 1.0));',
-    '  gl_FragColor = vec4(mix(uBack, uFront, v), 1.0);',
-    '}'
-  ].join('\n');
-
-  // 漫游·像素化：3 色阶有序抖动
-  var IMG_DITHER_FRAG = [
-    'precision mediump float;',
-    'varying vec2 vTextureCoord;',
-    'uniform sampler2D uSampler;',
-    'uniform float uSize;',
-    'uniform vec3 uBack;',
-    'uniform vec3 uFront;',
-    'uniform vec3 uHigh;',
-    'uniform float uMix;',
-    'uniform float uContrast;',
-    'float bayer2(vec2 a) { a = floor(a); return fract(a.x / 2.0 + a.y * a.y * 0.75); }',
-    'float bayer4(vec2 a) { return bayer2(0.5 * a) * 0.25 + bayer2(a); }',
-    'void main(void) {',
-    '  vec4 src = texture2D(uSampler, vTextureCoord);',
+    '  vec2 uv = vTextureCoord;',
+    '  vec4 src = texture2D(uSampler, uv);',
     '  float lum = dot(src.rgb, vec3(0.299, 0.587, 0.114));',
-    '  lum = clamp((lum - 0.5) * (1.0 + uContrast) + 0.5, 0.0, 1.0);',
-    '  float d = bayer4(gl_FragCoord.xy / max(uSize, 1.0)) - 0.5;',
-    '  float q = clamp(lum + d * 0.42, 0.0, 1.0);',
-    '  vec3 col = q < 0.5 ? mix(uBack, uFront, q * 2.0) : mix(uFront, uHigh, (q - 0.5) * 2.0);',
-    '  col = mix(col, src.rgb, uMix);',
-    '  gl_FragColor = vec4(col, 1.0);',
+    '  float wgt = smoothstep(0.30, 0.85, lum);',
+    '  float ph = uv.x * 2.0 + uv.y * 1.0 - uTime * 0.20;',
+    '  vec2 flow = vec2(',
+    '    sin(ph * 2.6 + uv.y * 5.0),',
+    '    sin(ph * 2.0 - uv.x * 4.0 + 1.7)',
+    '  );',
+    '  vec2 duv = clamp(uv + flow * uWave * 0.0045 * wgt, 0.002, 0.998);',
+    '  vec4 col = texture2D(uSampler, duv);',
+    '  float pulse = 0.5 + 0.5 * sin(ph * 3.0);',
+    '  col.rgb *= 1.0 + wgt * uGlow * (0.05 + 0.20 * pulse);',
+    '  float crest = wgt * uWave * pow(max(0.0, sin(ph * 3.2)), 8.0);',
+    '  col.rgb += vec3(0.85, 0.92, 1.0) * crest * 0.06;',
+    '  gl_FragColor = vec4(col.rgb, src.a);',
     '}'
   ].join('\n');
-
-  // 漫游·网点：六边形 halftone
-  var HALFTONE_FRAG = [
-    'precision mediump float;',
-    'varying vec2 vTextureCoord;',
-    'uniform sampler2D uSampler;',
-    'uniform float uSize;',
-    'uniform vec3 uBack;',
-    'uniform vec3 uFront;',
-    'uniform float uContrast;',
-    'void main(void) {',
-    '  vec4 src = texture2D(uSampler, vTextureCoord);',
-    '  float lum = dot(src.rgb, vec3(0.299, 0.587, 0.114));',
-    '  lum = clamp((lum - 0.5) * (1.0 + uContrast) + 0.5, 0.0, 1.0);',
-    '  float s = max(uSize, 2.0);',
-    '  vec2 p = gl_FragCoord.xy / s;',
-    '  p.y += mod(floor(p.x), 2.0) * 0.5;',
-    '  vec2 cell = fract(p) - 0.5;',
-    '  float dist = length(cell) * s;',
-    '  float r = (1.0 - lum) * s * 0.62;',
-    '  float a = smoothstep(r + 1.2, r - 1.2, dist);',
-    '  gl_FragColor = vec4(mix(uBack, uFront, a), 1.0);',
-    '}'
-  ].join('\n');
-
-  // 漫游·纸感：对比 + 纸纤维 + 颗粒
-  var PAPER_FRAG = [
-    'precision mediump float;',
-    'varying vec2 vTextureCoord;',
-    'uniform sampler2D uSampler;',
-    'uniform vec3 uBack;',
-    'uniform vec3 uFront;',
-    'uniform float uContrast;',
-    'uniform float uRough;',
-    'uniform float uMix;',
-    'float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }',
-    'void main(void) {',
-    '  vec4 src = texture2D(uSampler, vTextureCoord);',
-    '  float lum = dot(src.rgb, vec3(0.299, 0.587, 0.114));',
-    '  lum = clamp((lum - 0.5) * (1.0 + uContrast) + 0.5, 0.0, 1.0);',
-    '  vec2 px = gl_FragCoord.xy;',
-    '  float fiber = hash(floor(px * vec2(0.85, 0.06))) * 0.5 + hash(floor(px * vec2(0.06, 0.85))) * 0.5;',
-    '  float grain = hash(px * 0.71) - 0.5;',
-    '  float tex = (fiber - 0.5) * uRough + grain * 0.14 * uRough;',
-    '  vec3 col = mix(uBack, uFront, clamp(lum + tex, 0.0, 1.0));',
-    '  col = mix(col, src.rgb, uMix);',
-    '  gl_FragColor = vec4(col, 1.0);',
-    '}'
-  ].join('\n');
-
-  /**
-   * 着色器编译探测：临时 WebGL 上下文编译+链接，失败返回 false。
-   * 避免把错误 shader 交给 PIXI 后在渲染阶段刷 console error。
-   */
-  function probeShader(fragSrc) {
-    var cv = null, gl = null;
-    try {
-      cv = document.createElement('canvas');
-      cv.width = cv.height = 4;
-      gl = cv.getContext('webgl') || cv.getContext('experimental-webgl');
-      if (!gl) return false;
-      var vsSrc = [
-        'attribute vec2 aPosition;',
-        'varying vec2 vTextureCoord;',
-        'void main(void) {',
-        '  vTextureCoord = aPosition * 0.5 + 0.5;',
-        '  gl_Position = vec4(aPosition, 0.0, 1.0);',
-        '}'
-      ].join('\n');
-      var vs = gl.createShader(gl.VERTEX_SHADER);
-      gl.shaderSource(vs, vsSrc);
-      gl.compileShader(vs);
-      if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) return false;
-      var fs = gl.createShader(gl.FRAGMENT_SHADER);
-      gl.shaderSource(fs, fragSrc);
-      gl.compileShader(fs);
-      if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-        console.warn('[BgLayer] 片元着色器编译失败，降级：' + gl.getShaderInfoLog(fs));
-        return false;
-      }
-      var prog = gl.createProgram();
-      gl.attachShader(prog, vs);
-      gl.attachShader(prog, fs);
-      gl.linkProgram(prog);
-      var ok = !!gl.getProgramParameter(prog, gl.LINK_STATUS);
-      if (!ok) console.warn('[BgLayer] 着色器链接失败，降级');
-      gl.deleteProgram(prog);
-      gl.deleteShader(vs);
-      gl.deleteShader(fs);
-      return ok;
-    } catch (e) {
-      console.warn('[BgLayer] 着色器探测异常，降级：' + e.message);
-      return false;
-    } finally {
-      try {
-        var lose = gl && gl.getExtension('WEBGL_lose_context');
-        if (lose) lose.loseContext();
-      } catch (e2) { /* 忽略 */ }
-      cv = gl = null;
-    }
-  }
 
   /* ============================================================
    * 四、模式元数据（设置面板据此渲染）
@@ -404,48 +250,24 @@
         { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0 }
       ]
     },
-    latent: {
-      name: '隐现',
+    nebula: {
+      name: '星云',
       params: [
-        { key: 'display', label: '图层', min: 0, max: 2, step: 1, def: 0 },
-        { key: 'meshSpeed', label: '流速', min: 0, max: 2, step: 0.05, def: 0.55 },
-        { key: 'distortion', label: '失真', min: 0, max: 1.5, step: 0.05, def: 0.6 },
-        { key: 'swirl', label: '旋涡', min: 0, max: 1.5, step: 0.05, def: 0.5 },
-        { key: 'ditherSize', label: '像素', min: 1, max: 8, step: 0.2, def: 2.4 },
-        { key: 'ditherAlpha', label: '像素透明', min: 0, max: 1, step: 0.05, def: 0.55 },
-        { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0.3 }
+        { key: 'drift', label: '漂移', min: 0, max: 2, step: 0.05, def: 0.8 },
+        { key: 'breath', label: '呼吸', min: 0, max: 1, step: 0.05, def: 0.4 },
+        { key: 'wave', label: '光浪', min: 0, max: 1.5, step: 0.05, def: 0.6 },
+        { key: 'glow', label: '光晕', min: 0, max: 1.5, step: 0.05, def: 0.6 },
+        { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0.12 }
       ]
     },
-    monet: {
-      name: '莫奈',
+    aurora: {
+      name: '极光',
       params: [
-        { key: 'layout', label: '布局', min: 0, max: 1, step: 1, def: 0 },
-        { key: 'offset', label: '偏移', min: -50, max: 50, step: 1, def: 0 },
-        { key: 'blur', label: '模糊', min: 0, max: 20, step: 1, def: 8 },
-        { key: 'tint', label: '叠色', min: 0, max: 0.8, step: 0.05, def: 0.35 },
-        { key: 'wash', label: '水洗', type: 'color', def: '' },
-        { key: 'drift', label: '漂移', min: 0, max: 1, step: 0.05, def: 0.3 },
-        { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0.5 }
-      ]
-    },
-    nomand: {
-      name: '漫游',
-      params: [
-        { key: 'effect', label: '效果', min: 0, max: 2, step: 1, def: 0 },
-        { key: 'size', label: '颗粒', min: 1, max: 12, step: 0.5, def: 3 },
-        { key: 'mix', label: '原色', min: 0, max: 1, step: 0.05, def: 0.18 },
-        { key: 'contrast', label: '对比', min: 0, max: 2, step: 0.05, def: 0.4 },
-        { key: 'rough', label: '纸纹', min: 0, max: 1, step: 0.05, def: 0.45 },
-        { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0.35 }
-      ]
-    },
-    sora: {
-      name: '空',
-      params: [
-        { key: 'density', label: '密度', min: 40, max: 300, step: 10, def: 150 },
-        { key: 'speed', label: '漂移', min: 0.2, max: 2, step: 0.05, def: 1 },
-        { key: 'size', label: '大小', min: 0.5, max: 2, step: 0.05, def: 1 },
-        { key: 'glow', label: '辉光', min: 0, max: 1, step: 0.05, def: 0.55 }
+        { key: 'drift', label: '漂移', min: 0, max: 2, step: 0.05, def: 0.8 },
+        { key: 'breath', label: '呼吸', min: 0, max: 1, step: 0.05, def: 0.4 },
+        { key: 'wave', label: '光浪', min: 0, max: 1.5, step: 0.05, def: 0.7 },
+        { key: 'glow', label: '光晕', min: 0, max: 1.5, step: 0.05, def: 0.7 },
+        { key: 'dim', label: '压暗', min: 0, max: 0.85, step: 0.05, def: 0.1 }
       ]
     },
     warp: {
@@ -456,37 +278,25 @@
         { key: 'streak', label: '拉伸', min: 0, max: 1, step: 0.05, def: 0.55 },
         { key: 'glow', label: '辉光', min: 0, max: 1, step: 0.05, def: 0.6 }
       ]
-    }
+    },
+    // 星海共振 8 种共振效果：与上面 4 种并列的顶级背景模式（无二级菜单）。
+    // 视觉由 stellarResonance 引擎画进离屏 canvas，本层在 _buildStellar 里
+    // 把它作为 PIXI CanvasTexture 放进模式根容器 —— 与壁纸模式同一套生命周期。
+    sv0: { name: '引力吸积盘', params: [], variant: 0 },
+    sv1: { name: '声波涟漪干涉', params: [], variant: 1 },
+    sv2: { name: '克拉德尼驻波', params: [], variant: 2 },
+    sv3: { name: '李萨如电子束', params: [], variant: 3 },
+    sv4: { name: '极光帷幕', params: [], variant: 4 },
+    sv5: { name: '流场丝线', params: [], variant: 5 },
+    sv6: { name: '星座连线网络', params: [], variant: 6 },
+    sv7: { name: '拓扑等高线', params: [], variant: 7 }
   };
 
-  var MODE_ORDER = ['common', 'latent', 'monet', 'nomand', 'sora', 'warp'];
+  var MODE_ORDER = ['common', 'nebula', 'aurora', 'warp',
+    'sv0', 'sv1', 'sv2', 'sv3', 'sv4', 'sv5', 'sv6', 'sv7'];
 
   /* ============================================================
-   * 五、图形工具（几何漂浮）
-   * ============================================================ */
-
-  var SHAPE_POINTS = {
-    square: [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]],
-    triangle: [[0, -0.55], [0.5, 0.45], [-0.5, 0.45]],
-    cross: [
-      [-0.3, -0.5], [-0.5, -0.3], [-0.2, 0], [-0.5, 0.3], [-0.3, 0.5], [0, 0.2],
-      [0.3, 0.5], [0.5, 0.3], [0.2, 0], [0.5, -0.3], [0.3, -0.5], [0, -0.2]
-    ]
-  };
-
-  function rotatedPoints(cx, cy, pts, size, rot) {
-    var cos = Math.cos(rot), sin = Math.sin(rot);
-    var out = new Array(pts.length * 2);
-    for (var i = 0; i < pts.length; i++) {
-      var x = pts[i][0] * size, y = pts[i][1] * size;
-      out[i * 2] = cx + x * cos - y * sin;
-      out[i * 2 + 1] = cy + x * sin + y * cos;
-    }
-    return out;
-  }
-
-  /* ============================================================
-   * 六、BgLayer
+   * 五、BgLayer
    * ============================================================ */
 
   function BgLayer() {
@@ -495,6 +305,11 @@
     this.theme = null;
     this.palette = [0x00f0ff, 0xff00aa, 0x7fff00, 0xffcc00, 0x9b59ff, 0xff6b35];
     this.colors = { bg: 0x0a0420, primary: 0x00f0ff, secondary: 0xff00aa, accent: 0x00f0ff };
+    // 星海专用冷色板（背景统一青蓝，见 cosmicPalette）
+    this.cosmic = {
+      cyan: 0x4de7ff, gas: 0x2f7fd8, deep: 0x1a3f8f,
+      violet: 0x6f4fb0, magenta: 0xc23c8f, white: 0xf2fbff
+    };
     this.params = {};
 
     this.coverUrl = '';
@@ -507,11 +322,15 @@
     this._ready = false;
     this._modeRoot = null;
     this._modeFilters = [];
+    this._fading = [];       // 模式切换 crossfade：下沉中的旧层
+    this._fadeDur = 0.9;     // 秒
     this._bands = { bass: 0, lowMid: 0, mid: 0, vocal: 0, treble: 0, power: 0 };
     this._smooth = { bass: 0, lowMid: 0, mid: 0, vocal: 0, treble: 0, power: 0 };
     this.onPostFiltersChange = null;
 
-    this._shaderOk = { mesh: false, dither: false, imgDither: false, halftone: false, paper: false };
+    this._wpTex = null;      // 壁纸纹理缓存（init 时预载）
+    this._wp = null;         // 当前壁纸精灵
+    this._wpFilter = null;   // 光晕波浪滤镜
   }
 
   /* ---------------- 生命周期 ---------------- */
@@ -520,6 +339,8 @@
     var self = this;
     this.app = app || {};
     this.themes = themesModule || { getTheme: global.getTheme };
+    // 中心点是否被 CoreLayer 占用（星海模式据此让出中心，避免两套中心视觉重叠）
+    this._getCenterMode = (themesModule && themesModule.getCenterMode) || null;
     this.stage = this.app.stage || null;
     this.renderer = this.app.renderer || null;
 
@@ -555,12 +376,18 @@
       self.params[m] = o;
     });
 
-    // 着色器探测
-    this._shaderOk.mesh = probeShader(MESH_FRAG);
-    this._shaderOk.dither = probeShader(DITHER_FRAG);
-    this._shaderOk.imgDither = probeShader(IMG_DITHER_FRAG);
-    this._shaderOk.halftone = probeShader(HALFTONE_FRAG);
-    this._shaderOk.paper = probeShader(PAPER_FRAG);
+    // 星海共振引擎的减少动效偏好（模式激活时随 _buildStellar 下发）
+    var mq = global.matchMedia && global.matchMedia('(prefers-reduced-motion: reduce)');
+    this._stellarReduced = !!(mq && mq.matches);
+    if (mq && mq.addEventListener) {
+      mq.addEventListener('change', function (e) {
+        self._stellarReduced = !!e.matches;
+        if (self._stellar) self._stellar.setReducedMotion(self._stellarReduced);
+      });
+    }
+
+    // 预载壁纸纹理（星云 / 极光）
+    this._preloadWallpapers();
 
     this._ready = true;
     this._applyTheme(this.themes.getTheme ? this.themes.getTheme(this.app.themeId || 'nebula') : null,
@@ -602,6 +429,8 @@
       secondary: pal[2] || pal[1],
       accent: theme.accent || pal[3]
     };
+    // 背景统一冷色系（围绕中心星青蓝），与封面色板解耦
+    this.cosmic = cosmicPalette(this.colors.accent || pal[0]);
     if (this._ready && this.container) this.setMode(this.mode);
   };
 
@@ -614,7 +443,7 @@
     if (themeObj) this._applyTheme(themeObj, 'custom');
   };
 
-  // 封面：通用 / 莫奈 / 漫游 取图，隐现取色（配色由 setCustomTheme 提供）
+  // 封面：当前 5 种模式均不以封面为背景，保留接口存图备用
   BgLayer.prototype.setCover = function (url) {
     if (!url || url === this.coverUrl) return;
     var self = this;
@@ -625,86 +454,127 @@
     img.onload = function () {
       if (token !== self._coverToken) return;
       self._coverImage = img;
-      if (self._ready && (self.mode === 'monet' || self.mode === 'nomand')) {
-        self.setMode(self.mode);
-      }
     };
     img.onerror = function () {
-      // CORS 或网络问题：保持当前兜底渐变
+      // CORS 或网络问题：忽略
     };
     img.src = url;
   };
 
   /* ---------------- 模式切换 ---------------- */
 
-  BgLayer.prototype.setMode = function (modeId) {
+  /** 递归摘掉滤镜引用，避免销毁滤镜后渲染系统仍持有已销毁对象 */
+  function detachFilters(node) {
+    if (!node || !node.children) return;
+    var kids = node.children;
+    for (var i = 0; i < kids.length; i++) {
+      var ch = kids[i];
+      if (ch.filters) ch.filters = null;
+      detachFilters(ch);
+    }
+  }
+
+  BgLayer.prototype.setMode = function (modeId, opts) {
     if (!MODE_META[modeId]) modeId = 'common';
+    var same = (this.mode === modeId);
     this.mode = modeId;
     if (!this._ready || !this.container) return;
-    this._teardownMode();
-    this._modeRoot = new PIXI.Container();
-    this._modeRoot.interactive = false;
-    this._modeRoot.interactiveChildren = false;
-    this.container.addChild(this._modeRoot);
+
+    var prevRoot = this._modeRoot;
+    var prevFilters = this._modeFilters;
+    var prevAlpha = prevRoot ? prevRoot.alpha : 1;
+    // 同一模式重建（换主题）不做淡入淡出，避免闪一下
+    var immediate = !!(opts && opts.immediate) || same || !prevRoot;
+
+    // 星海共振纹理要等旧层淡出完成后才能销毁（否则 crossfade 白屏）
+    var bgSelf = this;
+    var prevStellarTex = this._stellarTex;
+    var prevGone = prevStellarTex ? function () {
+      prevStellarTex.destroy(true);
+      if (bgSelf._stellarTex === prevStellarTex) bgSelf._stellarTex = null;
+    } : null;
+
+    this._modeRoot = null;
+    this._modeFilters = [];
+    this._resetModeRefs();
+
+    var root = new PIXI.Container();
+    root.interactive = false;
+    root.interactiveChildren = false;
+    this.container.addChild(root);
+    this._modeRoot = root;
+
+    if (prevRoot) {
+      if (immediate) {
+        this._destroyModeRoot(prevRoot, prevFilters, prevGone);
+      } else {
+        // 旧层原地淡出 → 新层淡入：切换模式不闪黑、不硬切
+        this._fading.push({ root: prevRoot, filters: prevFilters, alpha: prevAlpha, onGone: prevGone });
+        root.alpha = 0;
+      }
+    } else {
+      root.alpha = 1;
+    }
 
     switch (modeId) {
       case 'common': this._buildCommon(); break;
-      case 'latent': this._buildLatent(); break;
-      case 'monet': this._buildMonet(); break;
-      case 'nomand': this._buildNomand(); break;
-      case 'sora': this._buildSora(); break;
+      case 'nebula':
+      case 'aurora': this._buildWallpaper(modeId); break;
       case 'warp': this._buildWarp(); break;
+      default:
+        if (MODE_META[modeId] && MODE_META[modeId].variant !== undefined) {
+          this._buildStellar(MODE_META[modeId].variant);
+        }
+        break;
     }
     this._notifyPost();
   };
 
-  BgLayer.prototype._teardownMode = function () {
-    // 先摘掉滤镜引用，再销毁，避免渲染系统仍持有已销毁滤镜（uniforms 已为 null）
-    if (this._meshSprite) this._meshSprite.filters = null;
-    if (this._latentMesh) this._latentMesh.sprite.filters = null;
-    if (this._commonMesh) this._commonMesh.sprite.filters = null;
-    if (this._ditherSprite) this._ditherSprite.filters = null;
-    if (this._monetBase) this._monetBase.filters = null;
-    if (this._nomandSprite) this._nomandSprite.filters = null;
+  BgLayer.prototype._destroyModeRoot = function (root, filters, onGone) {
+    if (!root) return;
+    detachFilters(root);
+    try {
+      root.removeChildren();
+      root.destroy({ children: true, texture: false, baseTexture: false });
+    } catch (e) { /* 忽略 */ }
+    for (var i = 0; i < (filters || []).length; i++) {
+      try { filters[i].destroy(); } catch (e2) { /* 忽略 */ }
+    }
+    if (onGone) onGone();
+  };
 
-    if (this._modeRoot) {
-      this._modeRoot.removeChildren();
-      this._modeRoot.destroy({ children: true, texture: false, baseTexture: false });
-      this._modeRoot = null;
-    }
-    for (var i = 0; i < this._modeFilters.length; i++) {
-      try { this._modeFilters[i].destroy(); } catch (e) { /* 忽略 */ }
-    }
-    this._modeFilters = [];
-    this._gShapes = null;
-    this._gParticles = null;
+  BgLayer.prototype._resetModeRefs = function () {
     this._dimVeil = null;
-    this._shapeData = null;
-    this._particleData = null;
-    this._backdrop = null;
-    this._commonMesh = null;
-    this._commonGlow = null;
     this._commonRoot = null;
     this._commonGlows = null;
-    this._backdropTexture = null;
-    this._gradSprite = null;
-    this._vigSprite = null;
-    this._meshSprite = null;
-    this._meshFilter = null;
-    this._latentMesh = null;
-    this._ditherSprite = null;
-    this._ditherFilter = null;
-    this._fallbackGrads = null;
-    this._monetBase = null;
-    this._monetBlur = null;
-    this._monetTint = null;
-    this._monetFade = null;
-    this._nomandSprite = null;
-    this._nomandFilter = null;
-    this._soraStars = null;
-    this._soraRoot = null;
+    this._wp = null;
+    this._wpGrads = null;
+    this._wpFilter = null;
     this._gWarp = null;
     this._warpStars = null;
+    // 星海共振引擎：立即停机（画布引用仍被淡出中的旧纹理持有，无害）
+    if (this._stellar) {
+      this._stellar.destroy();
+      this._stellar = null;
+    }
+    this._stellarTex = null;
+  };
+
+  BgLayer.prototype._teardownMode = function () {
+    var self = this;
+    var tex = this._stellarTex;
+    var onGone = tex ? function () {
+      tex.destroy(true);
+      if (self._stellarTex === tex) self._stellarTex = null;
+    } : null;
+    if (this._modeRoot) this._destroyModeRoot(this._modeRoot, this._modeFilters, onGone);
+    this._modeRoot = null;
+    this._modeFilters = [];
+    for (var i = 0; i < this._fading.length; i++) {
+      this._destroyModeRoot(this._fading[i].root, this._fading[i].filters, this._fading[i].onGone || onGone);
+    }
+    this._fading = [];
+    this._resetModeRefs();
     if (this.topContainer) this.topContainer.removeChildren();
     if (this.renderer) this.renderer.backgroundAlpha = 1;
   };
@@ -727,17 +597,8 @@
 
     if (modeId === 'common') {
       // glow / dim 由 tick 与通用 dim 分支实时读取，无需重建
-    } else if (modeId === 'latent') {
-      this.setMode('latent');
-    } else if (modeId === 'monet') {
-      this._applyMonetLayout();
-      this._applyMonetTint();
-      if (key === 'blur') this._applyMonetBlur();
-    } else if (modeId === 'nomand') {
-      this._applyNomandUniforms();
-    } else if (modeId === 'sora') {
-      if (key === 'density') this._buildSoraStars();
-      else this._applySoraSize();
+    } else if (modeId === 'nebula' || modeId === 'aurora') {
+      // 漂移 / 呼吸 / 压暗均由 tick 每帧读取，实时生效
     } else if (modeId === 'warp') {
       if (key === 'density') this._makeWarpStars();
     }
@@ -755,46 +616,26 @@
   BgLayer.prototype.resize = function (w, h) {
     this.w = w || this.w;
     this.h = h || this.h;
-    if (this.mode === 'common' || this.mode === 'monet' || this.mode === 'nomand') this.setMode(this.mode);
-    else if (this.mode === 'latent') this._resizeFullscreen();
+    // 全屏 shader 模式需按新尺寸重建；流星/穿梭按帧读取 w/h 自适应
+    var sm = MODE_META[this.mode];
+    if (this.mode === 'common' || this.mode === 'nebula' || this.mode === 'aurora' ||
+        (sm && sm.variant !== undefined)) this.setMode(this.mode);
+  };
+
+  /**
+   * 视差偏移：以画面中心为轴心，放大 5% 过扫描抵消位移带来的露边。
+   * topContainer（暗角等后处理）不跟随——它必须锚定屏幕边缘。
+   */
+  BgLayer.prototype.setOffset = function (x, y) {
+    if (!this.container) return;
+    this.container.pivot.set(this.w / 2, this.h / 2);
+    this.container.position.set(this.w / 2 + (x || 0), this.h / 2 + (y || 0));
+    this.container.scale.set(1.05);
   };
 
   /* ============================================================
-   * M1 通用：模糊封面 + 渐变叠色 + 几何漂浮
+   * M1 通用：主题色星云光斑漂浮
    * ============================================================ */
-
-  // 通用/隐现共用的流体层（6 色 mesh gradient）
-  BgLayer.prototype._createMeshLayer = function (speed, distortion, swirl, alpha) {
-    if (!this._shaderOk.mesh || this.perf) return null;
-    var sprite = new PIXI.Sprite(PIXI.Texture.WHITE);
-    sprite.width = this.w;
-    sprite.height = this.h;
-    sprite.blendMode = PIXI.BLEND_MODES.SCREEN;
-    sprite.alpha = alpha == null ? 1 : alpha;
-    var filter = null;
-    try {
-      filter = new PIXI.Filter(null, MESH_FRAG, {
-        uTime: 0,
-        uSpeed: speed,
-        uDistortion: distortion,
-        uSwirl: swirl,
-        uC0: toUniform(this.palette[0]),
-        uC1: toUniform(this.palette[1]),
-        uC2: toUniform(this.palette[2]),
-        uC3: toUniform(this.palette[3]),
-        uC4: toUniform(this.palette[4]),
-        uC5: toUniform(this.palette[5])
-      });
-      sprite.filters = [filter];
-      this._modeFilters.push(filter);
-    } catch (e) {
-      console.warn('[BgLayer] 流体 shader 创建失败，降级为渐变光斑：' + e.message);
-      try { sprite.destroy(); } catch (e2) { /* 忽略 */ }
-      return null;
-    }
-    this._modeRoot.addChild(sprite);
-    return { sprite: sprite, filter: filter, speed: speed, distortion: distortion, swirl: swirl };
-  };
 
   BgLayer.prototype._buildCommon = function () {
     // 纯色主题背景 + 星云辉光；星星由全局 ParallaxStarfield 统一绘制
@@ -803,8 +644,9 @@
 
     // 星云底光：主题色径向光斑，缓慢漂移
     this._commonGlows = [];
+    var baseCols = [this.cosmic.deep, this.cosmic.gas, this.cosmic.violet];
     for (var gi = 0; gi < 3; gi++) {
-      var gs = new PIXI.Sprite(radialTexture(this.palette[gi], 256));
+      var gs = new PIXI.Sprite(radialTexture(baseCols[gi], 256));
       gs.anchor.set(0.5);
       gs.blendMode = PIXI.BLEND_MODES.SCREEN;
       var gsize = Math.max(this.w, this.h) * (0.9 + gi * 0.35);
@@ -820,137 +662,12 @@
     this._addDimVeil(this.params.common.dim || 0);
   };
 
-  // 模糊封面 + 主题渐变叠色（与 folia 的 drawCover 同构，纯 Canvas2D 合成）
-  BgLayer.prototype._buildBackdropTexture = function () {
-    if (this._backdropTexture) {
-      try { this._backdropTexture.destroy(true); } catch (e) { /* 忽略 */ }
-      this._backdropTexture = null;
-    }
-    var cw = 360;
-    var ch = Math.max(1, Math.round(cw * this.h / Math.max(1, this.w)));
-    var cv = document.createElement('canvas');
-    cv.width = cw;
-    cv.height = ch;
-    var ctx = cv.getContext('2d');
-    var p = this.params.common;
-
-    ctx.fillStyle = cssHex(this.colors.bg);
-    ctx.fillRect(0, 0, cw, ch);
-
-    var img = this._coverImage;
-    if (img && img.width) {
-      // object-cover + 放大 1.5 倍 + 模糊（与 folia 的封面处理一致）
-      var scale = Math.max(cw / img.width, ch / img.height) * 1.5;
-      var dw = img.width * scale;
-      var dh = img.height * scale;
-      var blurPx = p.blur * (cw / Math.max(1, this.w)) * 1.5;
-      try { ctx.filter = 'blur(' + Math.max(0, blurPx).toFixed(2) + 'px)'; } catch (e) { /* 不支持则忽略 */ }
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
-      ctx.filter = 'none';
-    } else {
-      // 无封面：主题色径向渐变兜底
-      var g0 = ctx.createRadialGradient(cw * 0.3, ch * 0.32, 0, cw * 0.3, ch * 0.32, cw * 0.75);
-      g0.addColorStop(0, rgbaCss(this.colors.primary, 0.5));
-      g0.addColorStop(1, rgbaCss(this.colors.primary, 0));
-      ctx.fillStyle = g0;
-      ctx.fillRect(0, 0, cw, ch);
-      var g1 = ctx.createRadialGradient(cw * 0.76, ch * 0.68, 0, cw * 0.76, ch * 0.68, cw * 0.7);
-      g1.addColorStop(0, rgbaCss(this.colors.secondary, 0.42));
-      g1.addColorStop(1, rgbaCss(this.colors.secondary, 0));
-      ctx.fillStyle = g1;
-      ctx.fillRect(0, 0, cw, ch);
-    }
-
-    // 主色 → 透明 → 副色：soft-light 轻叠，避免 overlay 把画面推成一片土色
-    var diagonal = Math.hypot(cw, ch);
-    var half = (cw * ch) / diagonal;
-    var dx = (ch / diagonal) * half;
-    var dy = (cw / diagonal) * half;
-    var grad = ctx.createLinearGradient(cw / 2 - dx, ch / 2 - dy, cw / 2 + dx, ch / 2 + dy);
-    grad.addColorStop(0, cssHex(this.colors.primary));
-    grad.addColorStop(0.5, rgbaCss(this.colors.primary, 0));
-    grad.addColorStop(0.5, rgbaCss(this.colors.secondary, 0));
-    grad.addColorStop(1, cssHex(this.colors.secondary));
-    ctx.globalCompositeOperation = 'soft-light';
-    ctx.globalAlpha = 0.28;
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, cw, ch);
-    // 再压一层灰，让照片只作底衬（流体层会盖在上面）
-    ctx.globalCompositeOperation = 'source-over';
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, cw, ch);
-    ctx.globalAlpha = 1;
-
-    try {
-      this._backdropTexture = PIXI.Texture.from(cv);
-    } catch (e) {
-      console.warn('[BgLayer] 封面底图纹理创建失败（可能跨域受限），改用主题渐变：' + e.message);
-      this._backdropTexture = gradientTexture(this.palette, 512);
-    }
-    return this._backdropTexture;
-  };
-
-  BgLayer.prototype._invalidateBackdrop = function () {
-    if (this.mode !== 'common' || !this._backdrop) return;
-    var tex = this._buildBackdropTexture();
-    this._backdrop.texture = tex;
-    this._backdrop.width = this.w;
-    this._backdrop.height = this.h;
-  };
-
-  // 统一压暗层：把图片类背景压到不抢前景的程度（0 = 不压）
+  // 统一压暗层：把背景压到不抢前景的程度（0 = 不压）
   BgLayer.prototype._addDimVeil = function (alpha) {
     this._dimVeil = new PIXI.Graphics();
     this._dimVeil.beginFill(0x000000, 1).drawRect(0, 0, this.w, this.h).endFill();
     this._dimVeil.alpha = clamp(alpha || 0, 0, 1);
     this._modeRoot.addChild(this._dimVeil);
-  };
-
-  BgLayer.prototype._buildCommonGeometry = function () {
-    if (this._gShapes) { this._gShapes.destroy(); this._gShapes = null; }
-    if (this._gParticles) { this._gParticles.destroy(); this._gParticles = null; }
-    var p = this.params.common;
-    var self = this;
-
-    this._gShapes = new PIXI.Graphics();
-    this._modeRoot.addChild(this._gShapes);
-    this._gParticles = new PIXI.Graphics();
-    this._modeRoot.addChild(this._gParticles);
-
-    var types = ['circle', 'square', 'triangle', 'cross'];
-    var shapes = [];
-    for (var i = 0; i < Math.round(p.shapes); i++) {
-      shapes.push({
-        type: types[Math.floor(Math.random() * types.length)],
-        x: Math.random(),
-        y: Math.random(),
-        size: 40 + Math.random() * 100,
-        rot: Math.random() * Math.PI * 2,
-        rotSpd: (Math.random() > 0.5 ? 1 : -1) * (Math.PI * 2 / (30 + Math.random() * 30)) / 60,
-        dir: Math.random() > 0.5 ? 1 : -1,
-        dur: 30 + Math.random() * 30,
-        ph: Math.random() * Math.PI * 2,
-        alpha: 0.11 + Math.random() * 0.08,
-        filled: Math.random() < 0.3
-      });
-    }
-    this._shapeData = shapes;
-
-    var parts = [];
-    for (var j = 0; j < Math.round(p.particles); j++) {
-      parts.push({
-        x: Math.random(),
-        y: Math.random(),
-        size: 1 + Math.random() * 4,
-        dur: 15 + Math.random() * 20,
-        ph: Math.random() * 10,
-        peak: Math.random() * 0.3
-      });
-    }
-    this._particleData = parts;
   };
 
   BgLayer.prototype._tickCommon = function (dt) {
@@ -971,338 +688,178 @@
   };
 
   /* ============================================================
-   * M2 隐现：MeshGradient 流体 + 抖动像素
-   * ============================================================ */
-
-  BgLayer.prototype._buildLatent = function () {
-    var p = this.params.latent;
-    var showMesh = p.display !== 2;
-    var showDither = p.display !== 1;
-
-    if (showMesh) {
-      this._latentMesh = this._createMeshLayer(p.meshSpeed, p.distortion, p.swirl, 1);
-    }
-
-    // 降级（性能模式或 shader 不可用）：多层径向渐变光斑
-    if (showMesh && !this._latentMesh) {
-      this._fallbackGrads = [];
-      for (var i = 0; i < 5; i++) {
-        var sp = new PIXI.Sprite(radialTexture(this.palette[i % this.palette.length], 256));
-        sp.anchor.set(0.5);
-        sp.blendMode = PIXI.BLEND_MODES.SCREEN;
-        var size = Math.max(this.w, this.h) * (0.85 + i * 0.22);
-        sp.width = size;
-        sp.height = size;
-        sp.alpha = 0.16;
-        sp.x = this.w * (0.2 + (i % 3) * 0.3);
-        sp.y = this.h * (0.25 + Math.floor(i / 3) * 0.4);
-        this._modeRoot.addChild(sp);
-        this._fallbackGrads.push({ sprite: sp, ph: i * 1.7, cx: sp.x, cy: sp.y });
-      }
-    }
-
-    if (showDither && this._shaderOk.dither && !this.perf) {
-      this._ditherSprite = new PIXI.Sprite(PIXI.Texture.WHITE);
-      this._ditherSprite.width = this.w;
-      this._ditherSprite.height = this.h;
-      this._ditherSprite.blendMode = PIXI.BLEND_MODES.SCREEN;
-      this._ditherSprite.alpha = p.ditherAlpha;
-      try {
-        this._ditherFilter = new PIXI.Filter(null, DITHER_FRAG, {
-          uTime: 0,
-          uSpeed: 1,
-          uSize: p.ditherSize,
-          uBack: toUniform(0x000000),
-          uFront: toUniform(this.palette[0])
-        });
-        this._ditherSprite.filters = [this._ditherFilter];
-        this._modeFilters.push(this._ditherFilter);
-      } catch (e) {
-        console.warn('[BgLayer] 抖动 shader 创建失败，降级为颗粒纹理：' + e.message);
-        this._ditherFilter = null;
-      }
-      this._modeRoot.addChild(this._ditherSprite);
-    }
-
-    this._addDimVeil(this.params.latent.dim);
-  };
-
-  BgLayer.prototype._resizeFullscreen = function () {
-    if (this._latentMesh) { this._latentMesh.sprite.width = this.w; this._latentMesh.sprite.height = this.h; }
-    if (this._commonMesh) { this._commonMesh.sprite.width = this.w; this._commonMesh.sprite.height = this.h; }
-    if (this._ditherSprite) { this._ditherSprite.width = this.w; this._ditherSprite.height = this.h; }
-  };
-
-  BgLayer.prototype._tickLatent = function (dt) {
-    var p = this.params.latent;
-    var t = this._time * 0.001;
-    var bands = this._smooth;
-
-    if (this._latentMesh) {
-      var u = this._latentMesh.filter.uniforms;
-      u.uTime = t;
-      u.uSpeed = p.meshSpeed;
-      u.uDistortion = p.distortion + bands.power * 0.62;
-      u.uSwirl = p.swirl + bands.mid * 0.38;
-    } else if (this._fallbackGrads) {
-      for (var i = 0; i < this._fallbackGrads.length; i++) {
-        var g = this._fallbackGrads[i];
-        g.sprite.x = g.cx + Math.sin(t * 0.25 + g.ph) * this.w * 0.1;
-        g.sprite.y = g.cy + Math.cos(t * 0.2 + g.ph) * this.h * 0.08;
-        g.sprite.alpha = 0.14 + bands.bass * 0.2;
-      }
-    }
-
-    if (this._ditherFilter) {
-      var d = this._ditherFilter.uniforms;
-      d.uTime = t;
-      d.uSpeed = 0.7 + bands.bass * 1.2;
-      d.uSize = Math.max(1, p.ditherSize - bands.bass * p.ditherSize * 0.34);
-      d.uFront = toUniform(this.palette[0]);
-      if (this._ditherSprite) {
-        this._ditherSprite.alpha = clamp(p.ditherAlpha + bands.bass * 0.25, 0, 1);
-      }
-    }
-  };
-
   /* ============================================================
-   * M3 莫奈：图片铺满 / 半屏渐变
+   * M2/M3 壁纸背景：星云 / 极光（NASA 公版摄影，慢速漂移）
+   * 设计原则：背景是壁纸，不是伴舞——不跟音乐动，只有极缓慢的
+   * Ken Burns 式漂移与呼吸变焦，画面「活着」但永远不抢戏。
    * ============================================================ */
 
-  BgLayer.prototype._buildMonet = function () {
-    var p = this.params.monet;
-    var layer = new PIXI.Container();
-    this._modeRoot.addChild(layer);
-
-    var base = new PIXI.Sprite(this._coverImage ? this._coverTexture() : gradientTexture(this.palette, 512));
-    base.anchor.set(0.5);
-    layer.addChild(base);
-    this._monetBase = base;
-    this._applyMonetBlur();
-    this._addDimVeil(this.params.monet.dim);
-
-    var tint = new PIXI.Graphics();
-    layer.addChild(tint);
-    this._monetTint = tint;
-    this._applyMonetTint();
-
-    this._monetFade = new PIXI.Sprite();
-    this._monetFade.visible = false;
-    layer.addChild(this._monetFade);
-
-    this._applyMonetLayout();
+  var WALLPAPERS = {
+    nebula: { url: 'img/bg-nebula.jpg' }, // 哈勃 · 船底座星云（NASA 公版）
+    aurora: { url: 'img/bg-aurora.jpg' }  // ISS · 南极光（NASA 公版）
   };
 
-  BgLayer.prototype._coverTexture = function () {
-    if (!this._coverTexCache || this._coverTexCacheSrc !== this.coverUrl) {
-      try {
-        this._coverTexCache = PIXI.Texture.from(this._coverImage);
-        this._coverTexCacheSrc = this.coverUrl;
-      } catch (e) {
-        console.warn('[BgLayer] 封面纹理创建失败，使用渐变兜底');
-        return gradientTexture(this.palette, 512);
-      }
-    }
-    return this._coverTexCache;
+  // 预载壁纸纹理（init 时调用一次，之后切换模式秒开）
+  BgLayer.prototype._preloadWallpapers = function () {
+    var self = this;
+    this._wpTex = {};
+    Object.keys(WALLPAPERS).forEach(function (id) {
+      try { self._wpTex[id] = PIXI.Texture.from(WALLPAPERS[id].url); } catch (e) { /* 加载失败走降级 */ }
+    });
   };
 
-  BgLayer.prototype._applyMonetBlur = function () {
-    if (!this._monetBase) return;
-    var p = this.params.monet;
-    // 先释放上一个模糊滤镜，避免反复调参时堆积
-    if (this._monetBlur) {
-      var idx = this._modeFilters.indexOf(this._monetBlur);
-      if (idx >= 0) this._modeFilters.splice(idx, 1);
-      this._monetBase.filters = null;
-      try { this._monetBlur.destroy(); } catch (e) { /* 忽略 */ }
-      this._monetBlur = null;
-    }
-    if (p.blur > 0) {
-      var blur = new PIXI.filters.BlurFilter(p.blur);
-      this._monetBase.filters = [blur];
-      this._modeFilters.push(blur);
-      this._monetBlur = blur;
-    }
-  };
+  BgLayer.prototype._buildWallpaper = function (modeId) {
+    var tex = this._wpTex && this._wpTex[modeId];
+    var ok = tex && tex.baseTexture && tex.baseTexture.valid;
 
-  BgLayer.prototype._washColor = function () {
-    var w = this.params.monet.wash;
-    if (typeof w === 'string' && /^#[0-9a-fA-F]{6}$/.test(w)) return parseInt(w.slice(1), 16);
-    return this.colors.primary;
-  };
-
-  BgLayer.prototype._applyMonetTint = function () {
-    var tint = this._monetTint;
-    if (!tint) return;
-    tint.clear();
-    tint.beginFill(this._washColor(), 1).drawRect(0, 0, this.w, this.h).endFill();
-    tint.alpha = this.params.monet.tint;
-  };
-
-  BgLayer.prototype._applyMonetLayout = function () {
-    var base = this._monetBase;
-    if (!base) return;
-    var p = this.params.monet;
-    var w = this.w, h = this.h;
-    var tw = base.texture.width || 512;
-    var th = base.texture.height || 512;
-    var cover, centerY;
-
-    if (p.layout < 1) {
-      cover = Math.max(w / tw, h / th) * 1.25;
-      centerY = h / 2;
-      if (this._monetFade) this._monetFade.visible = false;
-    } else {
-      var regionH = h * 0.64;
-      cover = Math.max(w / tw, regionH / th) * 1.15;
-      centerY = h - (th * cover) / 2;
-      if (this._monetFade) {
-        var fadeH = Math.max(8, Math.round(h * 0.34));
-        this._monetFade.texture = verticalFadeTexture(this.colors.bg, Math.max(8, Math.round(w)), fadeH);
-        this._monetFade.width = w;
-        this._monetFade.height = fadeH;
-        this._monetFade.x = 0;
-        this._monetFade.y = h - regionH - fadeH * 0.5;
-        this._monetFade.visible = true;
-      }
-    }
-    base.scale.set(cover);
-    base.y = centerY;
-    this._monetCenterX = w / 2;
-    base.x = this._monetCenterX + (p.offset / 100) * w;
-  };
-
-  BgLayer.prototype._tickMonet = function (dt) {
-    var p = this.params.monet;
-    var base = this._monetBase;
-    if (!base) return;
-    var t = this._time * 0.001;
-    var span = this.w * 0.05 * p.drift;
-    base.rotation = Math.sin(t * 0.12) * 0.008;
-    base.x = (this._monetCenterX || this.w / 2)
-      + (p.offset / 100) * this.w
-      + Math.sin(t * 0.18 * (0.4 + p.drift)) * span;
-  };
-
-  /* ============================================================
-   * M4 漫游：Paper 纸感（像素化 / 网点 / 纸纹）
-   * ============================================================ */
-
-  BgLayer.prototype._buildNomand = function () {
-    var tex = this._coverImage ? this._coverTexture() : gradientTexture(this.palette, 512);
-    var sprite = new PIXI.Sprite(tex);
-    sprite.anchor.set(0.5);
-    var cover = Math.max(this.w / (tex.width || 512), this.h / (tex.height || 512)) * 1.02;
-    sprite.scale.set(cover);
-    sprite.x = this.w / 2;
-    sprite.y = this.h / 2;
-    this._modeRoot.addChild(sprite);
-    this._nomandSprite = sprite;
-    this._addDimVeil(this.params.nomand.dim);
-
-    var effect = this.params.nomand.effect;
-    var frag = effect === 1 ? HALFTONE_FRAG : (effect === 2 ? PAPER_FRAG : IMG_DITHER_FRAG);
-    var ok = effect === 1 ? this._shaderOk.halftone : (effect === 2 ? this._shaderOk.paper : this._shaderOk.imgDither);
-
-    if (ok && !this.perf) {
-      try {
-        var uniforms = {
-          uSize: this.params.nomand.size,
-          uBack: toUniform(this.colors.bg),
-          uFront: toUniform(this.colors.primary),
-          uHigh: toUniform(this.colors.accent),
-          uMix: this.params.nomand.mix,
-          uContrast: this.params.nomand.contrast,
-          uRough: this.params.nomand.rough
-        };
-        this._nomandFilter = new PIXI.Filter(null, frag, uniforms);
-        sprite.filters = [this._nomandFilter];
-        this._modeFilters.push(this._nomandFilter);
-      } catch (e) {
-        console.warn('[BgLayer] 纸感 shader 创建失败，降级为原图：' + e.message);
-        this._nomandFilter = null;
-      }
-    }
-  };
-
-  BgLayer.prototype._applyNomandUniforms = function () {
-    var f = this._nomandFilter;
-    if (!f) return;
-    var p = this.params.nomand;
-    f.uniforms.uSize = p.size;
-    f.uniforms.uMix = p.mix;
-    f.uniforms.uContrast = p.contrast;
-    f.uniforms.uRough = p.rough;
-    f.uniforms.uBack = toUniform(this.colors.bg);
-    f.uniforms.uFront = toUniform(this.colors.primary);
-    f.uniforms.uHigh = toUniform(this.colors.accent);
-  };
-
-  /* ============================================================
-   * M5 空：缓缓横移的星空
-   * ============================================================ */
-
-  BgLayer.prototype._buildSora = function () {
-    this._soraRoot = new PIXI.Container();
-    this._modeRoot.addChild(this._soraRoot);
-    this._soraTex = radialTexture(0xffffff, 48);
-    this._buildSoraStars();
-  };
-
-  BgLayer.prototype._buildSoraStars = function () {
-    var root = this._soraRoot;
-    if (!root) return;
-    root.removeChildren();
-    this._soraStars = [];
-    var n = Math.round(this.params.sora.density * (this.perf ? 0.6 : 1));
-    for (var i = 0; i < n; i++) {
-      var sp = new PIXI.Sprite(this._soraTex);
+    if (ok) {
+      var sp = new PIXI.Sprite(tex);
       sp.anchor.set(0.5);
-      var accent = Math.random() > 0.9;
-      sp.tint = accent ? this.colors.accent : this.palette[0];
-      root.addChild(sp);
-      this._soraStars.push({
-        sprite: sp,
-        x0: Math.random(),
-        y: 0.05 + Math.random() * 0.9,
-        speed: 0.008 + Math.random() * 0.024,
-        sizeRand: Math.pow(Math.random(), 3.8),
-        blinkSp: 1 + Math.random() * 2.5,
-        ph: Math.random() * Math.PI * 2
-      });
+      this._modeRoot.addChild(sp);
+      this._wp = { sprite: sp, mode: modeId };
+      this._layoutWallpaper();
+
+      // 光晕波浪滤镜：亮部缓慢流动 + 呼吸（纯时间驱动，不随音频）
+      try {
+        var wpP = this.params[modeId];
+        this._wpFilter = new PIXI.Filter(null, GLOW_WAVE_FRAG, {
+          uTime: 0,
+          uWave: wpP.wave == null ? 0.6 : wpP.wave,
+          uGlow: wpP.glow == null ? 0.6 : wpP.glow
+        });
+        sp.filters = [this._wpFilter];
+        this._modeFilters.push(this._wpFilter);
+      } catch (e) {
+        console.warn('[BgLayer] 光晕滤镜创建失败，退回静态壁纸：' + e.message);
+        this._wpFilter = null;
+      }
+
+      // 中心微压暗：让中心星从壁纸上「跳出来」（极淡的径向暗晕）
+      var veil = new PIXI.Sprite(radialTexture(0x000000, 512));
+      veil.anchor.set(0.5);
+      veil.width = veil.height = Math.max(this.w, this.h) * 1.15;
+      veil.x = this.w / 2;
+      veil.y = this.h / 2;
+      veil.alpha = 0.34;
+      this._modeRoot.addChild(veil);
+    } else {
+      // 降级：图片缺失或未加载完 → 冷色光斑缓慢漂移
+      this._wpGrads = [];
+      var cols = [this.cosmic.gas, this.cosmic.deep, this.cosmic.violet];
+      for (var i = 0; i < 4; i++) {
+        var gs = new PIXI.Sprite(radialTexture(cols[i % cols.length], 256));
+        gs.anchor.set(0.5);
+        gs.blendMode = PIXI.BLEND_MODES.ADD;
+        var size = Math.max(this.w, this.h) * (0.8 + i * 0.22);
+        gs.width = size;
+        gs.height = size;
+        gs.alpha = 0.1;
+        gs.x = this.w * (0.22 + (i % 3) * 0.28);
+        gs.y = this.h * (0.3 + Math.floor(i / 3) * 0.35);
+        this._modeRoot.addChild(gs);
+        this._wpGrads.push({ sprite: gs, ph: i * 1.7, cx: gs.x, cy: gs.y });
+      }
     }
-    this._applySoraSize();
+
+    this._addDimVeil(this.params[modeId].dim);
   };
 
-  BgLayer.prototype._applySoraSize = function () {
-    if (!this._soraStars) return;
-    var k = this.params.sora.size;
-    for (var i = 0; i < this._soraStars.length; i++) {
-      var s = this._soraStars[i];
-      var dia = (0.0012 + 0.0076 * s.sizeRand) * this.h * 2 * k;
-      s.sprite.width = dia;
-      s.sprite.height = dia;
-    }
+  // cover 铺满 + 漂移余量（放大 8%，四周留出缓慢平移的空间）
+  BgLayer.prototype._layoutWallpaper = function () {
+    var wp = this._wp;
+    if (!wp) return;
+    var tex = wp.sprite.texture;
+    var tw = tex.width || 1920;
+    var th = tex.height || 1080;
+    wp.baseScale = Math.max(this.w / tw, this.h / th) * 1.08;
   };
 
-  BgLayer.prototype._tickSora = function (dt) {
-    var stars = this._soraStars;
-    if (!stars) return;
+  // 壁纸只做两件事：极慢漂移 + 极慢呼吸变焦，与音频完全解耦
+  BgLayer.prototype._tickWallpaper = function () {
+    var p = this.params[this.mode] || {};
     var t = this._time * 0.001;
-    var w = this.w, h = this.h;
-    var p = this.params.sora;
-    for (var i = 0; i < stars.length; i++) {
-      var s = stars[i];
-      var x = (s.x0 + t * s.speed * p.speed) % 1.1 - 0.05;
-      s.sprite.x = x * w;
-      s.sprite.y = (s.y + Math.sin(t * 0.3 + s.ph) * 0.004) * h;
-      var blink = 0.3 + 0.7 * Math.sin(t * s.blinkSp + s.ph);
-      s.sprite.alpha = clamp(blink, 0, 1) * (0.55 + p.glow * 0.45);
+    var wp = this._wp;
+
+    if (wp) {
+      if (!wp.sprite.texture.baseTexture.valid) return; // 纹理未就绪
+      if (!wp.baseScale) this._layoutWallpaper();
+      var drift = p.drift == null ? 0.8 : p.drift;
+      var breath = p.breath == null ? 0.4 : p.breath;
+      var w = this.w, h = this.h;
+      // 漂移：约 2 分钟一个来回的正弦平移，幅度极小
+      wp.sprite.x = w / 2 + Math.sin(t * 0.052) * w * 0.018 * drift;
+      wp.sprite.y = h / 2 + Math.cos(t * 0.041) * h * 0.014 * drift;
+      // 呼吸：极缓慢变焦 1.0 ~ +3%
+      var zoom = 1 + breath * 0.03 * (0.5 + 0.5 * Math.sin(t * 0.033));
+      wp.sprite.scale.set(wp.baseScale * zoom);
+
+      // 光晕波浪：行波推进 + 亮度呼吸
+      if (this._wpFilter) {
+        var u = this._wpFilter.uniforms;
+        u.uTime = t;
+        u.uWave = p.wave == null ? 0.6 : p.wave;
+        u.uGlow = p.glow == null ? 0.6 : p.glow;
+      }
+    } else if (this._wpGrads) {
+      for (var i = 0; i < this._wpGrads.length; i++) {
+        var g = this._wpGrads[i];
+        g.sprite.x = g.cx + Math.sin(t * 0.05 + g.ph) * this.w * 0.04;
+        g.sprite.y = g.cy + Math.cos(t * 0.04 + g.ph) * this.h * 0.03;
+      }
     }
   };
 
   /* ============================================================
-   * M6 穿梭：向镜头飞来的星海（速度线）
+   * M6 星海共振系列（sv0–sv7）：stellarResonance 引擎 → CanvasTexture
+   * 引擎画进离屏 canvas，本层把它作为纹理放进模式根容器 ——
+   * 不插入 DOM、不遮挡 PIXI，切换/销毁/resize 与其他模式完全一致。
+   * ============================================================ */
+
+  BgLayer.prototype._stellarClock = function () {
+    return (global.performance && global.performance.now)
+      ? global.performance.now() / 1000 : Date.now() / 1000;
+  };
+
+  BgLayer.prototype._buildStellar = function (variant) {
+    if (!global.StellarResonance) return;
+    var eng = global.StellarResonance.create(variant, this.w, this.h, this._stellarClock());
+    eng.setPerfMode(this.perf);
+    eng.setReducedMotion(this._stellarReduced);
+    eng.setCenterZone(this._centerReserved());
+    this._stellar = eng;
+    this._stellarTex = PIXI.Texture.from(eng.canvas);
+    var sp = new PIXI.Sprite(this._stellarTex);
+    sp.width = this.w;
+    sp.height = this.h;
+    sp.interactive = false;
+    if (this._modeRoot) this._modeRoot.addChild(sp);
+  };
+
+  /** 中心特效开着（非「关闭」）时，星海背景让出中心区 */
+  BgLayer.prototype._centerReserved = function () {
+    if (!this._getCenterMode) return true;
+    return this._getCenterMode() !== 'none';
+  };
+
+  BgLayer.prototype._tickStellar = function (dt) {
+    if (!this._stellar || !this._stellarTex) return;
+    this._stellar.setCenterZone(this._centerReserved()); // 中心模式运行中切换也能即时生效
+    var redrawn = this._stellar.renderFrame(dt, this._stellarClock());
+    if (redrawn) this._stellarTex.update(); // 只有真重画才上传，reduced 静态帧零开销
+  };
+
+  /** 演奏事件转发：当前模式是星海共振时触发引擎脉冲 */
+  BgLayer.prototype.tapFx = function (x, y, note) {
+    if (this._stellar) this._stellar.hit(x, y, note | 0);
+  };
+
+  /** 换歌时重置波源与余晖 */
+  BgLayer.prototype.resetFx = function () {
+    if (this._stellar) this._stellar.reset();
+  };
+
+  /* ============================================================
+   * M5 穿梭：向镜头飞来的星海（速度线）
    * ============================================================ */
 
   BgLayer.prototype._buildWarp = function () {
@@ -1401,13 +958,32 @@
     s.treble += (boost(treble) - s.treble) * k;
     s.power += (clamp(power, 0, 1) - s.power) * k;
 
+    // 模式切换 crossfade：新层淡入、旧层淡出（旧层销毁前先摘滤镜）
+    var dts = Math.min(dt / 60, 0.05);
+    if (this._modeRoot && this._modeRoot.alpha < 1) {
+      this._modeRoot.alpha = Math.min(1, this._modeRoot.alpha + dts / this._fadeDur);
+    }
+    for (var fi = this._fading.length - 1; fi >= 0; fi--) {
+      var fade = this._fading[fi];
+      fade.alpha -= dts / this._fadeDur;
+      if (fade.alpha <= 0) {
+        this._destroyModeRoot(fade.root, fade.filters, fade.onGone);
+        this._fading.splice(fi, 1);
+      } else {
+        fade.root.alpha = fade.alpha;
+      }
+    }
+
     switch (this.mode) {
       case 'common': this._tickCommon(dt); break;
-      case 'latent': this._tickLatent(dt); break;
-      case 'monet': this._tickMonet(dt); break;
-      case 'nomand': break;
-      case 'sora': this._tickSora(dt); break;
+      case 'nebula':
+      case 'aurora': this._tickWallpaper(); break;
       case 'warp': this._tickWarp(dt); break;
+      default:
+        if (MODE_META[this.mode] && MODE_META[this.mode].variant !== undefined) {
+          this._tickStellar(dt);
+        }
+        break;
     }
   };
 

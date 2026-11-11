@@ -220,27 +220,57 @@
     var self = this;
     var song = this.current();
     if (!song) return;
+    // 换歌令牌：快速切歌时，旧歌的异步歌词/封面/主题回调凭此作废
+    var token = (this._trackToken = (this._trackToken || 0) + 1);
+    // 立刻清掉上一首的歌词与主题，避免面板短暂显示旧歌内容
+    this.lrc = [];
+    this.lyricLines = [];
+    this.lyricInfo = null;
+    this.lrcIndex = -1;
+    this.theme = null;
     if (this.onTrackChange) this.onTrackChange(song); // 通知背景层取封面
-    this.netease.playSong(song).then(function (ok) {
-      if (ok) self._loadSongExtras(song);
-    });
     this._renderNowPlaying();
+    this._renderLyrics();
+
+    var startPlayback = function (blobUrl) {
+      var p = blobUrl
+        ? self.netease.playSongBuffer(song, blobUrl)
+        : self.netease.playSong(song);
+      p.then(function (ok) {
+        if (ok && token === self._trackToken) self._loadSongExtras(song, token);
+      }).catch(function (e) {
+        console.warn('播放失败', e);
+      });
+    };
+
+    // 音游模式：RhythmGame 接管选歌（先缓存 → 铺面 → 延迟开播；失败降级在线预判）
+    var RG = global.RhythmGame;
+    if (RG && RG.isRhythm() && !song.local && RG.handleTrack(song, startPlayback)) {
+      return;   // 开播时机交给 RhythmGame
+    }
+
+    startPlayback(null);
   };
 
   // 播放后加载歌词 + AI 主题（搜索结果缺封面时先经 /song/detail 补全）
-  PlayerCard.prototype._loadSongExtras = function (song) {
+  PlayerCard.prototype._loadSongExtras = function (song, token) {
     var self = this;
+    token = (token == null) ? this._trackToken : token;
+    var stale = function () { return token !== self._trackToken; }; // 已切到别的歌
     var ready = song.coverUrl ? Promise.resolve(song) : this.netease.getSongDetail(song.id).then(function (d) {
       if (d && d.coverUrl) {
         song.coverUrl = d.coverUrl;
         if (d.album && !song.album) song.album = d.album;
+        if (stale()) return song;
         self._renderNowPlaying(); // 刷新 UI 封面
         if (self.onTrackChange) self.onTrackChange(song); // 补全封面后再通知背景层
       }
       return song;
     }).catch(function () { return song; });
     ready.then(function (s) {
+      if (stale()) return;
       return self.netease.getLyric(s.id).then(function (raw) {
+        if (stale()) return;
         var info = (global.Lyrics && global.Lyrics.build)
           ? global.Lyrics.build(raw)
           : { lines: [], source: 'none', hasWord: false };
@@ -250,7 +280,8 @@
         self.lrc = info.lines.map(function (l) { return { t: l.t, text: l.text }; });
         self.lrcIndex = -1;
         self._renderLyrics();
-        self._generateTheme(s);
+        self._syncLyric(); // 歌词到达立即对齐当前行（含前奏点亮第一句）
+        self._generateTheme(s, token);
       });
     });
   };
@@ -267,10 +298,12 @@
   };
 
   /* ---------- AI 主题生成 ---------- */
-  PlayerCard.prototype._generateTheme = function (song) {
+  PlayerCard.prototype._generateTheme = function (song, token) {
     var self = this;
+    if (token != null && token !== this._trackToken) return; // 已切歌，不再生成旧主题
     // 一次性取色回调（不占用 netease.onCoverColor，避免取色失败留下脏回调）
     this.netease._extractCoverColor(song.coverUrl, function (color, rgb) {
+      if (token != null && token !== self._trackToken) return; // 取色期间已切歌
       var mood = analyzeMood(self.lrc);
       // 背景色：封面主色压暗（情绪决定明度）
       var bgHsl = rgbToHsl(rgb.r, rgb.g, rgb.b);
@@ -288,6 +321,7 @@
     if (!this.lrc.length) return;
     var t = this.netease.audio.currentTime || 0;
     var idx = findLrcIndex(this.lrc, t);
+    if (idx === -1) idx = 0; // 前奏期间也点亮第一句，别让歌词空窗
     if (idx !== this.lrcIndex) {
       this.lrcIndex = idx;
       this._highlightLyric(idx);
@@ -334,19 +368,39 @@
     var song = { id: 0, name: name, artist: '本地文件', album: '', coverUrl: '', local: true, localUrl: url };
     this.queue = [song];
     this.index = 0;
-    this.netease.playLocalFile(url);
+    // 清掉上一首状态 + 换新令牌（与 playCurrent 一致）
+    var token = (this._trackToken = (this._trackToken || 0) + 1);
+    this.lrc = [];
+    this.lyricLines = [];
+    this.lyricInfo = null;
+    this.lrcIndex = -1;
+    this.theme = null;
     if (this.onTrackChange) this.onTrackChange(song);
     this._renderNowPlaying();
-    this._matchOnline(song, name);
+    this._renderLyrics();
+
+    var startLocal = function () {
+      self.netease.playLocalFile(url);
+    };
+    // 音游模式：本地文件直接全曲分析（音频已在本地，无需网络缓存）
+    var RG = global.RhythmGame;
+    if (RG && RG.isRhythm() && RG.handleLocalTrack(song, file, startLocal)) {
+      this._matchOnline(song, name, token);
+      return;
+    }
+    startLocal();
+    this._matchOnline(song, name, token);
   };
 
   // 智能匹配：用文件名（"歌手 - 歌名"）搜索在线歌曲 → 自动加载歌词与封面 + AI 主题
-  PlayerCard.prototype._matchOnline = function (song, keyword) {
+  PlayerCard.prototype._matchOnline = function (song, keyword, token) {
     var self = this;
+    token = (token == null) ? this._trackToken : token;
+    var stale = function () { return token !== self._trackToken; };
     var kw = keyword.replace(/_+/g, ' ').trim();
     if (!kw) return;
     this.netease.searchSongs(kw, 5).then(function (list) {
-      if (!list.length) return;
+      if (!list.length || stale()) return;
       var best = list[0];
       song.matchedId = best.id;
       if (best.artist && song.artist === '本地文件') song.artist = best.artist;
@@ -355,13 +409,15 @@
       // 封面补全（/search 结果常缺 picUrl，经 /song/detail 获取）
       var coverReady = best.coverUrl ? Promise.resolve(best) : self.netease.getSongDetail(best.id).catch(function () { return null; });
       coverReady.then(function (d) {
+        if (stale()) return;
         if (d && d.coverUrl) song.coverUrl = d.coverUrl;
         self._renderNowPlaying();
         if (song.coverUrl && self.onTrackChange) self.onTrackChange(song); // 封面就绪后再通知背景层
-        self._generateTheme(song); // 匹配封面 → 沉浸式 AI 主题
+        self._generateTheme(song, token); // 匹配封面 → 沉浸式 AI 主题
       });
       // 歌词匹配（播放进度同步沿用 timeupdate → _syncLyric）
       self.netease.getLyric(best.id).then(function (raw) {
+        if (stale()) return;
         var info = (global.Lyrics && global.Lyrics.build)
           ? global.Lyrics.build(raw)
           : { lines: [], source: 'none', hasWord: false };
@@ -370,6 +426,7 @@
         self.lrc = info.lines.map(function (l) { return { t: l.t, text: l.text }; });
         self.lrcIndex = -1;
         self._renderLyrics();
+        self._syncLyric(); // 歌词到达立即对齐当前行
       });
     }).catch(function (e) {
       console.warn('本地歌曲在线匹配失败', e);

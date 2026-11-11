@@ -13,7 +13,8 @@ var LyricStage = (function () {
   'use strict';
 
   var STORAGE_KEY = 'uta.lyricStageMode';
-  var DEFAULT_MODE = 'folia-stream';
+  var DEFAULT_MODE = 'karaoke';          // 默认逐字点亮
+  var LEGACY_DEFAULT = 'folia-stream';   // 2026-11 前的旧默认（流光），自动写入的需迁移
   var FONT = 'PingFang SC, Microsoft YaHei, sans-serif';
 
   function clamp(v, a, b) {
@@ -37,7 +38,13 @@ var LyricStage = (function () {
   function loadMode() {
     try {
       var v = window.localStorage.getItem(STORAGE_KEY);
-      if (v) return v;
+      if (v === LEGACY_DEFAULT) {
+        // 旧默认值会在首次进入时被自动写入，并非用户主动选择：
+        // 清掉，让新默认（逐字点亮）生效；用户之后仍可手动切回流光
+        window.localStorage.removeItem(STORAGE_KEY);
+      } else if (v) {
+        return v;
+      }
     } catch (e) { /* 隐私模式忽略 */ }
     return DEFAULT_MODE;
   }
@@ -436,6 +443,7 @@ var LyricStage = (function () {
 
     var time = +state.time || 0;
     var idx = this._norm.length ? LyricTiming.activeIndex(this._norm, time) : -1;
+    if (idx === -1 && this._norm.length) idx = 0; // 前奏期间主舞台先亮第一句
     var line = idx >= 0 ? this._norm[idx] : null;
     var next = (idx >= 0 && idx + 1 < this._norm.length) ? this._norm[idx + 1] : null;
 

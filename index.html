@@ -10,14 +10,17 @@
   <meta name="description" content="星海共振 - 点击屏幕生成音效与粒子波纹的音画交互作品。">
   <title>星海共振 · Stellar Resonance</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%A6%3C/text%3E%3C/svg%3E">
-  <link charset="utf-8" href="css/utatap.css?v=20261201" rel="stylesheet">
-  <script charset="utf-8" src="vendor/jquery.min.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="vendor/pixi.min.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="vendor/pixi-filters.min.js?v=20261201" type="text/javascript"></script>
+  <link charset="utf-8" href="css/utatap.css?v=20261111c" rel="stylesheet">
+  <script charset="utf-8" src="vendor/jquery.min.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="vendor/pixi.min.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="vendor/pixi-filters.min.js?v=20261108b" type="text/javascript"></script>
 </head>
 
 <body>
   <div id="view"></div>
+
+  <!-- 自定义光标：3D 星晶体 + 光尾（全部绘制在画布上） -->
+  <canvas id="cursor-trail" aria-hidden="true"></canvas>
 
   <!-- ============ 欢迎页 ============ -->
   <div id="scene_top">
@@ -71,7 +74,7 @@
   <!-- ============ 设置面板 ============ -->
   <div id="select_cover"></div>
   <div id="select" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-hidden="true" inert>
-    <div id="select_in" class="uta-window settings-window">
+    <div id="select_in" class="uta-window settings-window settings-card">
       <header class="uta-head settings-head">
         <div class="uta-head-meta">
           <h3 class="panel-title" id="settings-title">设置</h3>
@@ -81,47 +84,15 @@
       </header>
       <div class="settings-body">
         <aside class="settings-rail" id="settings-rail" role="tablist" aria-label="设置分组" aria-orientation="vertical">
-          <button class="settings-nav is-active" id="nav-tone" data-pane="tone" role="tab" aria-selected="true" aria-controls="pane-tone">音色</button>
-          <button class="settings-nav" id="nav-theme" data-pane="theme" role="tab" aria-selected="false" aria-controls="pane-theme">主题</button>
-          <button class="settings-nav" id="nav-bg" data-pane="bg" role="tab" aria-selected="false" aria-controls="pane-bg">背景</button>
+          <button class="settings-nav is-active" id="nav-bg" data-pane="bg" role="tab" aria-selected="true" aria-controls="pane-bg">背景</button>
           <button class="settings-nav" id="nav-center" data-pane="center" role="tab" aria-selected="false" aria-controls="pane-center">中心</button>
+          <button class="settings-nav" id="nav-play" data-pane="play" role="tab" aria-selected="false" aria-controls="pane-play">演奏</button>
           <button class="settings-nav" id="nav-lyrics" data-pane="lyrics" role="tab" aria-selected="false" aria-controls="pane-lyrics">歌词<span class="settings-nav-sub" id="settings-nav-mode" hidden></span></button>
           <button class="settings-nav" id="nav-mods" data-pane="mods" role="tab" aria-selected="false" aria-controls="pane-mods">模组</button>
           <button class="settings-nav" id="nav-fx" data-pane="fx" role="tab" aria-selected="false" aria-controls="pane-fx">特效</button>
         </aside>
         <div class="settings-main" id="settings-main">
-          <section class="settings-pane is-active" id="pane-tone" data-pane="tone" role="tabpanel" aria-labelledby="nav-tone">
-            <div class="setting-group">
-              <label class="group-title">音色</label>
-              <div class="option-grid" id="waveform-grid">
-                <label class="option-item selected"><input type="radio" name="waveform" value="harmonic" checked>泛音叠加</label>
-                <label class="option-item"><input type="radio" name="waveform" value="sine">正弦波</label>
-                <label class="option-item"><input type="radio" name="waveform" value="square">方波</label>
-                <label class="option-item"><input type="radio" name="waveform" value="triangle">三角波</label>
-                <label class="option-item"><input type="radio" name="waveform" value="sawtooth">锯齿波</label>
-                <label class="option-item"><input type="radio" name="waveform" value="noise">白噪声</label>
-              </div>
-            </div>
-            <div class="setting-group">
-              <label class="group-title">音量</label>
-              <div class="slider-item"><span>主音量</span><input type="range" id="slider-volume" min="0" max="1" step="0.05" value="0.6"></div>
-            </div>
-          </section>
-
-          <section class="settings-pane" id="pane-theme" data-pane="theme" role="tabpanel" aria-labelledby="nav-theme" hidden>
-            <div class="setting-group">
-              <label class="group-title">主题</label>
-              <div class="theme-list" id="theme-list">
-                <div class="theme-chip active" data-theme="nebula" style="background:linear-gradient(135deg,#0a0420,#00f0ff)">星海共振</div>
-                <div class="theme-chip" data-theme="aurora" style="background:linear-gradient(135deg,#001a33,#00ff88)">极光之舞</div>
-                <div class="theme-chip" data-theme="ember" style="background:linear-gradient(135deg,#1a0000,#ff6600)">熔岩星火</div>
-                <div class="theme-chip" data-theme="cyberpunk" style="background:linear-gradient(135deg,#0d0d1a,#ff2d95)">赛博霓虹</div>
-                <div class="theme-chip" data-theme="deepocean" style="background:linear-gradient(135deg,#001018,#00e5ff)">深海秘境</div>
-              </div>
-            </div>
-          </section>
-
-          <section class="settings-pane" id="pane-bg" data-pane="bg" role="tabpanel" aria-labelledby="nav-bg" hidden>
+          <section class="settings-pane is-active" id="pane-bg" data-pane="bg" role="tabpanel" aria-labelledby="nav-bg">
             <div class="setting-group">
               <label class="group-title">背景模式</label>
               <div class="option-grid" id="bg-mode-grid"></div>
@@ -139,6 +110,28 @@
               <label class="group-title">中心特效</label>
               <div class="option-grid" id="center-mode-grid"></div>
               <div id="center-params" class="bg-params"></div>
+            </div>
+          </section>
+
+          <section class="settings-pane" id="pane-play" data-pane="play" role="tabpanel" aria-labelledby="nav-play" hidden>
+            <div class="setting-group">
+              <label class="group-title">演奏模式</label>
+              <div class="option-grid" id="tapmode-grid"></div>
+              <div class="netease-hint">节奏挑战：音符只在中心四个分区亮起（Q 左上 / W 右上 / E 左下 / R 右下），按对应按键或点击分区敲击；同一时刻最多两个提示，被跳过的节奏点直接丢弃不计 MISS。选歌后先完整缓存并铺面，完成后自动开始；网络不可用时自动降级为实时预判。</div>
+            </div>
+            <div class="setting-group" id="rhythm-param-group">
+              <label class="group-title">节奏挑战参数</label>
+              <div class="option-grid" id="rhythm-diff-grid"></div>
+              <div id="rhythm-params" class="bg-params"></div>
+              <div class="toggle-list">
+                <label class="toggle-item">宽松判定（任意分区都算命中）
+                  <input type="checkbox" id="toggle-lenient"><span class="toggle-switch"></span>
+                </label>
+                <label class="toggle-item">节拍脉冲辅助（中心点随节拍闪动）
+                  <input type="checkbox" id="toggle-beatpulse" checked><span class="toggle-switch"></span>
+                </label>
+              </div>
+              <div class="netease-hint">判定偏移为负 = 判定整体提前（补偿蓝牙耳机延迟可调正值）；敲亮起的分区获得判定，敲错分区照常发声但该提示算错过，敲四分区之外不参与判定。节拍脉冲只在中心闪，提示「什么时候该敲」，不提示敲哪个分区。</div>
             </div>
           </section>
 
@@ -196,6 +189,10 @@
               <div class="slider-item"><span>喷射初速</span><input type="range" id="slider-speed" min="2" max="8" step="0.5" value="5"></div>
               <div class="slider-item"><span>引力强度（聚拢）</span><input type="range" id="slider-gravity" min="0" max="1" step="0.05" value="0.5"></div>
             </div>
+            <div class="setting-group">
+              <label class="group-title">音量</label>
+              <div class="slider-item"><span>主音量</span><input type="range" id="slider-volume" min="0" max="1" step="0.05" value="0.6"></div>
+            </div>
             <div class="setting-actions">
               <button id="btn-reset" class="btn-danger">重置画布</button>
             </div>
@@ -208,7 +205,7 @@
   <!-- ============ 播放页（玻璃 UI） ============ -->
   <div id="player_cover"></div>
   <div id="player" role="dialog" aria-modal="true" aria-labelledby="pc-name" aria-hidden="true">
-    <div id="player_in" class="pc-glass uta-window player-window">
+    <div id="player_in" class="pc-glass uta-window player-window player-card">
 
       <!-- 登录视图 -->
       <div id="pc_not_logged" class="pc-login">
@@ -230,11 +227,12 @@
         <header class="uta-head uta-head--tall pc-head">
           <div class="pc-head-cover"><img id="pc-cover" alt=""></div>
           <div class="pc-head-meta">
-            <div id="pc-name" class="pc-title">未在播放</div>
-            <div id="pc-artist" class="pc-artist">—</div>
+            <div id="pc-name" class="pc-title">星海待机</div>
+            <div id="pc-artist" class="pc-artist">从右侧选一首歌，开始聆听</div>
             <div id="pc-album" class="pc-album"></div>
           </div>
           <div class="pc-head-actions">
+            <button id="pc-fm-badge" class="pc-fm-badge" hidden aria-label="退出私人 FM" title="退出私人 FM">FM</button>
             <span id="pc-mood" class="pc-badge"></span>
             <button id="pc-settings" class="uta-close" aria-label="打开设置" title="设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M10.3 3.2a2 2 0 0 1 3.4 0l.4.7a2 2 0 0 0 2.3.9l.8-.2a2 2 0 0 1 2.4 2.4l-.2.8a2 2 0 0 0 .9 2.3l.7.4a2 2 0 0 1 0 3.4l-.7.4a2 2 0 0 0-.9 2.3l.2.8a2 2 0 0 1-2.4 2.4l-.8-.2a2 2 0 0 0-2.3.9l-.4.7a2 2 0 0 1-3.4 0l-.4-.7a2 2 0 0 0-2.3-.9l-.8.2a2 2 0 0 1-2.4-2.4l.2-.8a2 2 0 0 0-.9-2.3l-.7-.4a2 2 0 0 1 0-3.4l.7-.4a2 2 0 0 0 .9-2.3l-.2-.8a2 2 0 0 1 2.4-2.4l.8.2a2 2 0 0 0 2.3-.9l.4-.7Z"/><circle cx="12" cy="12" r="3"/></svg></button>
             <button id="bt_player_close" class="uta-close" aria-label="关闭播放器"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11" /></svg></button>
@@ -253,63 +251,60 @@
 
           <div id="pc-side-overlay" class="pc-side-overlay" aria-hidden="true"></div>
           <aside class="pc-side" id="pc-side">
-            <div class="pc-side-tabs" role="tablist" aria-label="播放器控制面板">
-              <button class="pc-side-tab active" data-side="visual" role="tab" aria-selected="true">视觉</button>
-              <button class="pc-side-tab" data-side="lyrics" role="tab" aria-selected="false">歌词</button>
-              <button class="pc-side-tab" data-side="theme" role="tab" aria-selected="false">主题</button>
-              <div class="pc-side-row2">
-                <button class="pc-side-tab" data-side="library" role="tab" aria-selected="false">曲库</button>
-                <button class="pc-side-tab" data-side="mods" role="tab" aria-selected="false">模组</button>
-              </div>
+            <div class="pc-side-tabs" role="tablist" aria-label="音乐内容面板">
+              <button class="pc-side-tab active" data-side="recommend" role="tab" aria-selected="true">推荐</button>
+              <button class="pc-side-tab" data-side="playlists" role="tab" aria-selected="false">歌单</button>
+              <button class="pc-side-tab" data-side="recent" role="tab" aria-selected="false">最近</button>
+              <button class="pc-side-tab" data-side="queue" role="tab" aria-selected="false">队列</button>
             </div>
             <div class="pc-side-body">
-              <section class="pc-side-panel" data-side-panel="visual" role="tabpanel">
-                <div class="pc-panel-card">
-                  <div class="pc-section-title">视觉模式</div>
-                  <div id="pc-visual-grid" class="pc-chip-grid"></div>
-                  <div class="pc-section-title">中心特效</div>
-                  <div id="pc-center-grid" class="pc-chip-grid"></div>
-                  <label class="toggle-item">AI 主题<input type="checkbox" id="pc-ai-toggle" checked><span class="toggle-switch"></span></label>
+              <section class="pc-side-panel" data-side-panel="recommend" role="tabpanel">
+                <div class="pc-fm-card" id="pc-fm-card" role="button" tabindex="0" aria-label="私人 FM">
+                  <span class="pc-fm-icon">FM</span>
+                  <span class="pc-fm-meta">
+                    <strong>私人 FM</strong>
+                    <span>根据你的口味自动连播</span>
+                  </span>
+                  <button class="pc-fm-toggle" id="pc-fm-toggle" aria-label="播放私人 FM">
+                    <svg class="pc-fm-play" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8.2 5.1v13.8L19.4 12 8.2 5.1Z"/></svg>
+                    <svg class="pc-fm-pause" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" hidden><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+                  </button>
                 </div>
+                <div class="pc-sec-head">
+                  <span id="pc-recommend-count">今日推荐</span>
+                  <button class="pc-text-btn" id="pc-recommend-playall">全部播放</button>
+                </div>
+                <div id="pc-recommend-list" class="pc-song-list"></div>
               </section>
-              <section class="pc-side-panel" data-side-panel="lyrics" style="display:none;" role="tabpanel">
-                <div class="pc-panel-card">
-                  <div class="pc-section-title">歌词</div>
-                  <label class="toggle-item">逐字推进<input type="checkbox" id="pc-opt-word" checked><span class="toggle-switch"></span></label>
-                  <label class="toggle-item">翻译字幕<input type="checkbox" id="pc-opt-tr" checked><span class="toggle-switch"></span></label>
-                  <label class="toggle-item">下一句提示<input type="checkbox" id="pc-opt-next" checked><span class="toggle-switch"></span></label>
-                  <label class="toggle-item">关键词着色<input type="checkbox" id="pc-opt-kw" checked><span class="toggle-switch"></span></label>
-                  <div id="pc-lyric-source" class="netease-hint">—</div>
+
+              <section class="pc-side-panel" data-side-panel="playlists" style="display:none;" role="tabpanel">
+                <div class="pc-liked-entry" id="pc-liked-entry" role="button" tabindex="0">
+                  <span class="pc-liked-cover">
+                    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 20.4 4.3 13a4.8 4.8 0 0 1 0-6.9 4.9 4.9 0 0 1 6.9 0L12 6.9l.8-.8a4.9 4.9 0 0 1 6.9 0 4.8 4.8 0 0 1 0 6.9L12 20.4Z"/></svg>
+                  </span>
+                  <span class="pc-liked-meta">
+                    <strong>我喜欢的音乐</strong>
+                    <span id="pc-liked-count">286 首</span>
+                  </span>
                 </div>
+                <div class="pc-sec-head"><span>我的歌单</span></div>
+                <div id="pc-playlist-grid" class="pc-playlist-grid"></div>
               </section>
-              <section class="pc-side-panel" data-side-panel="theme" style="display:none;" role="tabpanel">
-                <div class="pc-panel-card">
-                  <div class="pc-section-title">主题</div>
-                  <div id="pc-theme-grid" class="pc-theme-grid"></div>
+
+              <section class="pc-side-panel" data-side-panel="recent" style="display:none;" role="tabpanel">
+                <div class="pc-sec-head">
+                  <span>最近播放</span>
+                  <button class="pc-text-btn" id="pc-recent-clear">清空</button>
                 </div>
+                <div id="pc-recent-list" class="pc-song-list"></div>
               </section>
-              <section class="pc-side-panel" data-side-panel="library" style="display:none;" role="tabpanel">
-                <div class="pc-panel-card">
-                  <div class="pc-search-row">
-                    <input type="text" id="pc-search-input" placeholder="搜索歌曲 / 歌手 / 专辑" class="pc-search-input">
-                    <button id="pc-search-btn" class="pc-search-btn">搜索</button>
-                  </div>
-                  <div class="pc-search-row" style="margin-top:8px;">
-                    <button id="pc-local-btn" class="pc-search-btn">本地歌曲</button>
-                    <button id="pc-pl-btn" class="pc-search-btn">我的歌单</button>
-                    <input type="file" id="pc-local-file" accept="audio/*" style="display:none;">
-                  </div>
-                  <div id="pc-search-result" class="pc-list"></div>
-                  <div id="pc-playlist-back" class="pc-back" style="display:none;">← 返回歌单列表</div>
-                  <div id="pc-playlist-list" class="pc-list" style="display:none;"></div>
-                  <div id="pc-playlist-detail" class="pc-list" style="display:none;"></div>
+
+              <section class="pc-side-panel" data-side-panel="queue" style="display:none;" role="tabpanel">
+                <div class="pc-sec-head">
+                  <span id="pc-queue-count">共 0 首</span>
+                  <button class="pc-text-btn" id="pc-queue-clear">清空</button>
                 </div>
-              </section>
-              <section class="pc-side-panel" data-side-panel="mods" style="display:none;" role="tabpanel">
-                <div class="pc-panel-card">
-                  <div class="pc-section-title">模组</div>
-                  <div id="pc-mods" class="pc-mods"></div>
-                </div>
+                <div id="pc-queue-list" class="pc-song-list"></div>
               </section>
             </div>
           </aside>
@@ -386,17 +381,18 @@
     </div>
   </div>
 
-  <script charset="utf-8" src="js/themes.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyrics.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricTiming.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricTunings.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/visualizerRegistry.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/lyricStage.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/builtinLyricModes.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/modHost.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/modLoader.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="mods/sample-glow/mod.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="mods/wave-light/mod.js?v=20261201" type="text/javascript"></script>
+  <script charset="utf-8" src="js/themes.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyrics.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricTiming.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricFlow.js?v=20261108k" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricTunings.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/visualizerRegistry.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/lyricStage.js?v=20261110d" type="text/javascript"></script>
+  <script charset="utf-8" src="js/builtinLyricModes.js?v=20261108k" type="text/javascript"></script>
+  <script charset="utf-8" src="js/modHost.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/modLoader.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="mods/sample-glow/mod.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="mods/wave-light/mod.js?v=20261108b" type="text/javascript"></script>
   <script charset="utf-8" type="text/javascript">
     // 原生 Folia 模组（ES Module）：由 modLoader 动态 import 后接入 UTAMods
     UTAModsESM.register({
@@ -424,22 +420,52 @@
       description: '为商籁动画提供相机、逐字运动、视差、转场等倍率参数，出现在商籁的参数面板下方。'
     });
   </script>
-  <script charset="utf-8" src="js/bgLayer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/audioEngine.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/flowField.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/meshReformer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/metaballRenderer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/parallaxStarfield.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/particleSystem.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/rippleEffect.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/spectrumVisualizer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/gridLayer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/coreLayer.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/djFxEngine.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/netease.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/player.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/player-ui.js?v=20261201" type="text/javascript"></script>
-  <script charset="utf-8" src="js/main.js?v=20261201" type="text/javascript"></script>
+  <!-- ============ 音游模式：状态 HUD + 结算卡 ============ -->
+  <div id="rhythm-hud" hidden>
+    <div id="rh-status"></div>
+    <div id="rh-stats" hidden>
+      <span id="rh-combo" class="rh-combo"></span>
+      <span id="rh-score" class="rh-score"></span>
+      <span id="rh-acc" class="rh-acc"></span>
+    </div>
+  </div>
+  <div id="rhythm-result" hidden>
+    <div class="rr-card">
+      <div class="rr-rank" id="rr-rank">S</div>
+      <div class="rr-title">节奏挑战结算</div>
+      <div class="rr-rows">
+        <div class="rr-row"><span>得分</span><b id="rr-score">0</b></div>
+        <div class="rr-row"><span>最大连击</span><b id="rr-combo">0</b></div>
+        <div class="rr-row"><span>准确率</span><b id="rr-acc">0%</b></div>
+        <div class="rr-judges" id="rr-judges"></div>
+      </div>
+      <div class="rr-actions">
+        <button id="rr-replay" class="rr-btn" type="button">再来一遍</button>
+        <button id="rr-close" class="rr-btn rr-ghost" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script charset="utf-8" src="js/bgLayer.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/audioEngine.js?v=20261109b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/flowField.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/meshReformer.js?v=20261109d" type="text/javascript"></script>
+  <script charset="utf-8" src="js/metaballRenderer.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/parallaxStarfield.js?v=20261109g" type="text/javascript"></script>
+  <script charset="utf-8" src="js/particleSystem.js?v=20261109e" type="text/javascript"></script>
+  <script charset="utf-8" src="js/rippleEffect.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/spectrumVisualizer.js?v=20261108b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/gridLayer.js?v=20261111e" type="text/javascript"></script>
+  <script charset="utf-8" src="js/coreLayer.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/stellarResonance.js?v=20261111b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/beatGrid.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/djFxEngine.js?v=20261111b" type="text/javascript"></script>
+  <script charset="utf-8" src="js/netease.js?v=20261111c" type="text/javascript"></script>
+  <script charset="utf-8" src="js/chartBuilder.js?v=20261111c" type="text/javascript"></script>
+  <script charset="utf-8" src="js/rhythmGame.js?v=20261111f" type="text/javascript"></script>
+  <script charset="utf-8" src="js/player.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/player-ui.js?v=20261111a" type="text/javascript"></script>
+  <script charset="utf-8" src="js/main.js?v=20261111e" type="text/javascript"></script>
 </body>
 
 </html>

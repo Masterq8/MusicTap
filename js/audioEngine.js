@@ -2,7 +2,75 @@
  * Web Audio 合成引擎 - 零外部音频资源，纯实时合成
  * 6 种音色：正弦 / 方波 / 三角 / 锯齿 / 泛音叠加 / 白噪声
  * Y 轴 → 音高，X 轴 → 声像（Pan）
+ *
+ * WaveformOsc 是六种波形的共享工厂，djFxEngine 的旋律层共用同一套算法，
+ * 保证设置面板的音色选择对演示路由与主点击路径一致生效。
  */
+
+/**
+ * 六种波形共享工厂（audioEngine 与 djFxEngine 共用）。
+ * @param {AudioContext} ctx   音频上下文
+ * @param {number} freq        基频（Hz）
+ * @param {string} waveform    sine | square | triangle | sawtooth | harmonic | noise
+ * @param {number} when        排程起始时间（ctx.currentTime 基准）
+ * @returns {{outs: AudioNode[], sources: AudioNode[]}}
+ *   outs    —— 接到包络增益的输出节点（harmonic 为每泛音一个增益节点）
+ *   sources —— 可 stop() 的振荡器/声源；调用方负责在音符结束时 stop，防止泄漏
+ */
+var WaveformOsc = function (ctx, freq, waveform, when) {
+  var outs = [];
+  var sources = [];
+
+  if (waveform === 'harmonic') {
+    var HARMONICS = [
+      { mult: 1, gain: 0.5 },
+      { mult: 2, gain: 0.25 },
+      { mult: 3, gain: 0.15 },
+      { mult: 4, gain: 0.1 }
+    ];
+    for (var i = 0; i < HARMONICS.length; i++) {
+      var h = HARMONICS[i];
+      var osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = freq * h.mult;
+      var g = ctx.createGain();
+      g.gain.value = h.gain;
+      osc.connect(g);
+      osc.start(when);
+      outs.push(g);
+      sources.push(osc);
+    }
+  } else if (waveform === 'noise') {
+    // 噪声缓冲按 ctx 缓存复用，避免每次发音重建
+    var cache = WaveformOsc._noiseCache || (WaveformOsc._noiseCache = new WeakMap());
+    var buf = cache.get(ctx);
+    if (!buf) {
+      var len = Math.floor(ctx.sampleRate * 0.2);
+      buf = ctx.createBuffer(1, len, ctx.sampleRate);
+      var d = buf.getChannelData(0);
+      for (var j = 0; j < len; j++) d[j] = Math.random() * 2 - 1;
+      cache.set(ctx, buf);
+    }
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.start(when);
+    outs.push(src);
+    sources.push(src);
+  } else {
+    var o = ctx.createOscillator();
+    o.type = waveform;
+    o.frequency.value = freq;
+    o.start(when);
+    outs.push(o);
+    sources.push(o);
+  }
+
+  return { outs: outs, sources: sources };
+};
+
+if (typeof window !== 'undefined') window.WaveformOsc = WaveformOsc;
+else if (typeof globalThis !== 'undefined') globalThis.WaveformOsc = WaveformOsc;
+
 var AudioEngine = function () {
   this.ctx = null;
   this.masterGain = null;
@@ -55,11 +123,8 @@ AudioEngine.prototype.playNote = function (note, pan) {
   var panner = this.ctx.createStereoPanner ? this.ctx.createStereoPanner() : null;
   if (panner) panner.pan.value = pan || 0;
 
-  var osc = this.createOscillator(freq, now);
-
-  var nodes = Array.isArray(osc) ? osc : [osc];
-  var self = this;
-  nodes.forEach(function (o) { o.connect(gain); });
+  var bundle = this.createOscillator(freq, now);
+  bundle.outs.forEach(function (o) { o.connect(gain); });
   if (panner) { gain.connect(panner); panner.connect(this.masterGain); }
   else { gain.connect(this.masterGain); }
 
@@ -69,45 +134,17 @@ AudioEngine.prototype.playNote = function (note, pan) {
   gain.gain.exponentialRampToValueAtTime(this.volume * 0.1, now + 0.3);
   gain.gain.exponentialRampToValueAtTime(0.001, now + 0.8);
 
-  this.activeNodes[id] = { osc: osc, gain: gain };
+  this.activeNodes[id] = { bundle: bundle, gain: gain };
+  // 包络 0.8s 结束后自动回收振荡器（stopNote 无常规调用者，不排程则永久泄漏）
+  var stopAt = now + 0.9;
+  bundle.sources.forEach(function (s) {
+    try { s.stop(stopAt); } catch (e) {}
+  });
   return id;
 };
 
 AudioEngine.prototype.createOscillator = function (freq, now) {
-  var self = this;
-  if (this.waveform === 'harmonic') {
-    var harmonics = [
-      { mult: 1, gain: 0.5 },
-      { mult: 2, gain: 0.25 },
-      { mult: 3, gain: 0.15 },
-      { mult: 4, gain: 0.1 }
-    ];
-    return harmonics.map(function (h) {
-      var osc = self.ctx.createOscillator();
-      osc.type = 'sine';
-      osc.frequency.value = freq * h.mult;
-      var g = self.ctx.createGain();
-      g.gain.value = h.gain;
-      osc.connect(g);
-      osc.start(now);
-      return g;
-    });
-  }
-  if (this.waveform === 'noise') {
-    var bufferSize = this.ctx.sampleRate * 0.2;
-    var buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
-    var data = buffer.getChannelData(0);
-    for (var i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
-    var source = this.ctx.createBufferSource();
-    source.buffer = buffer;
-    source.start(now);
-    return source;
-  }
-  var osc = this.ctx.createOscillator();
-  osc.type = this.waveform;
-  osc.frequency.value = freq;
-  osc.start(now);
-  return osc;
+  return WaveformOsc(this.ctx, freq, this.waveform, now);
 };
 
 AudioEngine.prototype.stopNote = function (id) {
@@ -118,13 +155,12 @@ AudioEngine.prototype.stopNote = function (id) {
   entry.gain.gain.cancelScheduledValues(now);
   entry.gain.gain.setValueAtTime(entry.gain.gain.value, now);
   entry.gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
-  var self = this;
+  var sources = entry.bundle.sources;
+  var outs = entry.bundle.outs;
   setTimeout(function () {
-    if (!Array.isArray(entry.osc)) { try { entry.osc.stop(); } catch (e) {} }
-    else entry.osc.forEach(function (o) { try { o.stop(); } catch (e) {} });
+    sources.forEach(function (s) { try { s.stop(); } catch (e) {} });
+    outs.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
     try { entry.gain.disconnect(); } catch (e) {}
-    if (Array.isArray(entry.osc)) entry.osc.forEach(function (o) { try { o.disconnect(); } catch (e) {} });
-    else { try { entry.osc.disconnect(); } catch (e) {} }
   }, 100);
   delete this.activeNodes[id];
 };
