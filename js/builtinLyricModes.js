@@ -164,14 +164,19 @@ var BuiltinLyricModes = (function () {
     this.width = window.innerWidth || 800;
     this.height = window.innerHeight || 600;
     this.elapsed = 0;
+    this.time = 0;            // 音频时钟（秒），退场队列按它结算
     this.line = null;
     this.index = -1;
+    this.offset = 0;          // 连续行索引：canvas 场景用它做滚动插值
     this.optKey = '';
     this.theme = null;
     this.colors = themeColors(null);
     this.ready = false;
     this.modeId = null;
     this._tuneVer = -1;
+    this._retiring = [];      // 正在退场的节点队列（{ el, dieAt }）
+    this._offsetReady = false;
+    this.flowLead = 1;        // 预入场倍率，个别场景可调小
     this.common = (typeof LyricTunings !== 'undefined')
       ? LyricTunings.getCommon()
       : { font: 'sans', fontScale: 1, opacity: 1 };
@@ -197,7 +202,9 @@ var BuiltinLyricModes = (function () {
   };
 
   Scene.prototype.update = function (dt, s) {
-    this.elapsed += Math.min(dt || 0, 0.05);
+    dt = Math.min(dt || 0, 0.05);
+    this.elapsed += dt;
+    this.time = +s.time || 0;
     this.width = s.width || this.width;
     this.height = s.height || this.height;
     if (typeof LyricTunings !== 'undefined') {
@@ -223,6 +230,18 @@ var BuiltinLyricModes = (function () {
       this.theme = s.theme;
       this.colors = themeColors(s.theme);
     }
+
+    // 预入场：把"当前句"提前到 lead 窗口，入场动画在开口前就位。
+    // 只改这一帧的状态对象，LyricStage 的真实时间线不受影响。
+    if (typeof LyricFlow !== 'undefined' && s.lines && s.lines.length) {
+      var ahead = LyricFlow.aheadIndex(s.lines, s.index, this.time, this.flowLead);
+      if (ahead !== s.index) {
+        s.index = ahead;
+        s.line = s.lines[ahead] || null;
+        s.next = ahead + 1 < s.lines.length ? s.lines[ahead + 1] : null;
+      }
+    }
+
     var key = this.optKeyOf(s.opts);
     if (!this.ready || s.line !== this.line || key !== this.optKey) {
       this.ready = true;
@@ -234,8 +253,101 @@ var BuiltinLyricModes = (function () {
     } else if (themeChanged && this.applyTheme) {
       this.applyTheme(this.colors);
     }
+    this._stepOffset(dt);
     this.onFrame(dt, s);
+    this._flushRetiring();
   };
+
+  /** 连续行索引：canvas 场景用 offset 做滚动插值，消除"跳一格" */
+  Scene.prototype._stepOffset = function (dt) {
+    var target = this.index >= 0 ? this.index : 0;
+    if (!this._offsetReady) {
+      this.offset = target;
+      this._offsetReady = true;
+      return;
+    }
+    // 拖动进度条跨越多行时直接落位，避免一路滚过去
+    if (Math.abs(target - this.offset) > 2.5) { this.offset = target; return; }
+    var k = 1 - Math.exp(-(dt || 0.016) * 7.5);
+    this.offset += (target - this.offset) * k;
+    if (Math.abs(target - this.offset) < 0.0015) this.offset = target;
+  };
+
+  /**
+   * 把节点放进退场轨道：立即开始淡出，但真正的 remove 由音频时钟结算。
+   * 暂停时不会继续清理，拖动时会因为 time 跳变立刻结算，不会堆积。
+   */
+  Scene.prototype.retire = function (el, opts) {
+    if (!el || !el.parentNode) return null;
+    opts = opts || {};
+    var tr = (typeof LyricFlow !== 'undefined') ? LyricFlow.TR : null;
+    var dur = opts.dur != null ? opts.dur : (tr ? tr.exit : 0.26);
+    var ease = opts.ease || (tr ? tr.easeIn : 'ease-in');
+    var blur = opts.blur === false ? 0 : (opts.blur || (tr ? tr.blurOut : 6));
+    el.style.pointerEvents = 'none';
+    el.style.willChange = 'opacity,transform,filter';
+    el.style.transition = 'opacity ' + dur + 's ' + ease +
+      ',transform ' + dur + 's ' + ease + ',filter ' + dur + 's ' + ease;
+    el.style.opacity = '0';
+    if (blur) el.style.filter = 'blur(' + blur + 'px)';
+    if (opts.transform) el.style.transform = opts.transform;
+    this._retiring.push({ el: el, dieAt: this.time + dur + 0.08 });
+    return el;
+  };
+
+  Scene.prototype._flushRetiring = function () {
+    var list = this._retiring;
+    if (!list || !list.length) return;
+    for (var i = list.length - 1; i >= 0; i--) {
+      if (list[i].dieAt <= this.time) {
+        var el = list[i].el;
+        if (el && el.parentNode) el.parentNode.removeChild(el);
+        list.splice(i, 1);
+      }
+    }
+  };
+
+  /**
+   * 把节点从文档流里摘出来，冻结在当前视觉位置。
+   * 旧句这样退场就不会继续占 flex 宽度把新句挤偏（云阶/倾诉的横跳根因）。
+   */
+  Scene.prototype.detach = function (el, host) {
+    if (!el || !el.parentNode) return el;
+    var ref = host || el.parentNode;
+    var r = el.getBoundingClientRect();
+    var h = ref.getBoundingClientRect();
+    el.style.position = 'absolute';
+    el.style.left = (r.left - h.left) + 'px';
+    el.style.top = (r.top - h.top) + 'px';
+    el.style.width = r.width + 'px';
+    el.style.height = r.height + 'px';
+    el.style.margin = '0';
+    el.style.transformOrigin = 'center center';
+    return el;
+  };
+
+  /** 统一入场：先写初值，强制结算一次样式，再切到终值，保证 transition 一定跑 */
+  Scene.prototype.enter = function (el, opts) {
+    if (!el) return el;
+    opts = opts || {};
+    var tr = (typeof LyricFlow !== 'undefined') ? LyricFlow.TR : null;
+    var dur = opts.dur != null ? opts.dur : (tr ? tr.enter : 0.34);
+    var ease = opts.ease || (tr ? tr.ease : 'ease-out');
+    var delay = opts.delay || 0;
+    var tween = 'opacity ' + dur + 's ' + ease + (delay ? ' ' + delay + 's' : '') +
+      ',transform ' + dur + 's ' + ease + (delay ? ' ' + delay + 's' : '') +
+      ',filter ' + dur + 's ' + ease + (delay ? ' ' + delay + 's' : '');
+    el.style.opacity = '0';
+    if (opts.from) el.style.transform = opts.from;
+    if (opts.blur) el.style.filter = 'blur(' + opts.blur + 'px)';
+    void el.offsetWidth;
+    el.style.transition = tween;
+    el.style.opacity = opts.to != null ? String(opts.to) : '1';
+    el.style.transform = opts.transform || 'none';
+    if (opts.blur) el.style.filter = 'blur(0px)';
+    return el;
+  };
+
 
   Scene.prototype.onLine = function () {};
   Scene.prototype.onFrame = function () {};
@@ -245,6 +357,7 @@ var BuiltinLyricModes = (function () {
     if (this.layout) this.layout();
   };
   Scene.prototype.dispose = function () {
+    if (this._retiring) this._retiring.length = 0;
     this.box.innerHTML = '';
   };
 
@@ -253,16 +366,22 @@ var BuiltinLyricModes = (function () {
   function StillScene(box) { Scene.call(this, box); }
   inherit(StillScene, Scene);
 
+  StillScene.prototype._layer = function (slot) {
+    var wrap = el('div', 'position:absolute;left:0;right:0;top:0;display:flex;flex-direction:column;align-items:center;opacity:0;will-change:opacity,transform;', slot);
+    var text = el('div', 'line-height:1.25;letter-spacing:.02em;white-space:pre-wrap;text-align:center;', wrap);
+    var tr = el('div', 'letter-spacing:.02em;white-space:pre-wrap;text-align:center;', wrap);
+    return { wrap: wrap, text: text, tr: tr };
+  };
+
   StillScene.prototype.mount = function () {
     // Folia：不渲染背景，只在最上层压一层中心透明的径向暗角
     this.vignette = el('div', 'position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center, transparent 0%, #000 100%);opacity:.65;', this.box);
     this.wrap = el('div', 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:32px;padding:0 48px 64px;pointer-events:none;text-align:center;', this.box);
     this.slots = [];
     for (var i = 0; i < 3; i++) {
-      var slot = el('div', 'width:100%;max-width:896px;display:flex;flex-direction:column;align-items:center;', this.wrap);
-      var text = el('div', 'line-height:1.25;letter-spacing:.02em;white-space:pre-wrap;', slot);
-      var tr = el('div', 'letter-spacing:.02em;white-space:pre-wrap;', slot);
-      this.slots.push({ slot: slot, text: text, tr: tr });
+      var slot = el('div', 'position:relative;width:100%;max-width:896px;', this.wrap);
+      // 每格两层交替：新的写入非活动层再做交叉淡化，不再瞬时换字
+      this.slots.push({ slot: slot, layers: [this._layer(slot), this._layer(slot)], active: 0, key: '' });
     }
   };
 
@@ -275,41 +394,73 @@ var BuiltinLyricModes = (function () {
     var idx = this.effIndex;
     var showTr = !s.opts || s.opts.translation !== false;
     var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
+    var TR = (typeof LyricFlow !== 'undefined') ? LyricFlow.TR : null;
+    var enterDur = TR ? TR.enter : 0.34;
+    var exitDur = TR ? TR.exit : 0.26;
+    var ease = TR ? TR.ease : 'ease-out';
+    var easeIn = TR ? TR.easeIn : 'ease-in';
 
     for (var k = 0; k < 3; k++) {
+      var view = this.slots[k];
       var offset = k - 1;
       var line = lines[idx + offset];
-      var view = this.slots[k];
       var isCurrent = offset === 0;
+      var key = line
+        ? ((line.text || '') + '\u0001' + (showTr ? (line.tr || '') : '') + '\u0001' + (isCurrent ? 1 : 0))
+        : '';
+
+      if (key === view.key) continue; // 这一格内容没变，不重播动画
+      view.key = key;
+
+      var old = view.layers[view.active];
+      var next = view.layers[1 - view.active];
+      view.active = 1 - view.active;
+
       if (!line) {
+        next.text.textContent = '';
+        next.tr.textContent = '';
+        next.tr.style.display = 'none';
         view.slot.style.height = Math.round(80 * base) + 'px';
-        setText(view.text, '');
-        setText(view.tr, '');
-        view.tr.style.display = 'none';
-        continue;
+      } else {
+        view.slot.style.height = '';
+        next.text.textContent = line.text || '';
+        next.text.style.fontSize = Math.round((isCurrent ? 40 : 30) * base) + 'px';
+        next.text.style.fontWeight = isCurrent ? '700' : '600';
+        next.text.style.color = hex(this.colors.primary);
+        var trText = showTr ? (line.tr || '') : '';
+        next.tr.textContent = trText;
+        next.tr.style.display = trText ? '' : 'none';
+        next.tr.style.fontSize = Math.round((isCurrent ? 24 : 20) * base) + 'px';
+        next.tr.style.fontWeight = isCurrent ? '500' : '400';
+        next.tr.style.color = hex(this.colors.secondary);
+        next.tr.style.marginTop = (isCurrent ? 12 : 8) + 'px';
+        view.slot.style.height = next.wrap.offsetHeight + 'px';
       }
-      view.slot.style.height = '';
-      setText(view.text, line.text || '');
-      view.text.style.fontSize = Math.round((isCurrent ? 40 : 30) * base) + 'px';
-      view.text.style.fontWeight = isCurrent ? '700' : '600';
-      view.text.style.opacity = isCurrent ? '1' : '0.3';
-      view.text.style.color = hex(this.colors.primary);
-      var trText = showTr ? (line.tr || '') : '';
-      setText(view.tr, trText);
-      view.tr.style.display = trText ? '' : 'none';
-      view.tr.style.fontSize = Math.round((isCurrent ? 24 : 20) * base) + 'px';
-      view.tr.style.fontWeight = isCurrent ? '500' : '400';
-      view.tr.style.opacity = isCurrent ? '0.8' : '0.3';
-      view.tr.style.marginTop = (isCurrent ? 12 : 8) + 'px';
-      view.tr.style.color = hex(this.colors.secondary);
+
+      // 新层：从下方 10px 处淡入；旧层：上移 8px 淡出，两层同时存在完成交接
+      next.wrap.style.transition = 'none';
+      next.wrap.style.opacity = '0';
+      next.wrap.style.transform = 'translateY(' + (isCurrent ? 10 : 6) + 'px)';
+      void next.wrap.offsetWidth;
+      next.wrap.style.transition = 'opacity ' + enterDur + 's ' + ease + ',transform ' + enterDur + 's ' + ease;
+      next.wrap.style.opacity = line ? (isCurrent ? '1' : '0.3') : '0';
+      next.wrap.style.transform = 'translateY(0px)';
+
+      if (old.wrap.style.opacity !== '0' && old.wrap.style.opacity !== '') {
+        old.wrap.style.transition = 'opacity ' + exitDur + 's ' + easeIn + ',transform ' + exitDur + 's ' + easeIn;
+        old.wrap.style.opacity = '0';
+        old.wrap.style.transform = 'translateY(-8px)';
+      }
     }
   };
 
   StillScene.prototype.applyTheme = function (c) {
-    if (!this.slots || !this.line) return;
+    if (!this.slots) return;
     for (var k = 0; k < 3; k++) {
-      this.slots[k].text.style.color = hex(c.primary);
-      this.slots[k].tr.style.color = hex(c.secondary);
+      for (var i = 0; i < 2; i++) {
+        this.slots[k].layers[i].text.style.color = hex(c.primary);
+        this.slots[k].layers[i].tr.style.color = hex(c.secondary);
+      }
     }
   };
 
@@ -370,14 +521,32 @@ var BuiltinLyricModes = (function () {
     this.cv = el('canvas', 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;', this.box);
     this.g = this.cv.getContext('2d');
     this.stage = el('div', 'position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 6%;pointer-events:none;', this.box);
-    this.prevEl = el('div', 'position:absolute;left:50%;top:32%;transform:translate(-50%,-50%);white-space:nowrap;opacity:.4;filter:blur(.6px);', this.stage);
-    this.curEl = el('div', 'position:relative;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;max-width:78%;', this.stage);
-    this.nextEl = el('div', 'position:absolute;left:50%;top:62%;transform:translate(-50%,-50%);white-space:nowrap;opacity:.45;filter:blur(.6px);', this.stage);
+    // 上下两句用 0 尺寸锚点承载：换行时新旧两层交叉淡化，不再瞬间改字
+    this.prevHost = el('div', 'position:absolute;left:50%;top:32%;width:0;height:0;', this.stage);
+    this.nextHost = el('div', 'position:absolute;left:50%;top:62%;width:0;height:0;', this.stage);
+    this.curEl = null;
     this.sub = el('div', 'position:absolute;left:0;right:0;bottom:8%;text-align:center;padding:0 16px;pointer-events:none;opacity:0;transition:opacity .24s ease-out;', this.box);
     this.subText = el('div', 'font-weight:500;line-height:1.35;', this.sub);
     this.subNext = el('div', 'font-weight:400;line-height:1.35;margin-top:8px;filter:blur(1px);', this.sub);
     this.dust = null;
     this.layout();
+  };
+
+  /** 0 尺寸锚点上的单行字幕：写入新层 → 淡入，旧层交给退场队列 */
+  StreamScene.prototype._swapText = function (host, text, css, peak) {
+    if (!host) return;
+    var cur = host.__cur;
+    if (cur && cur.__text === text) return;
+    var TR = (typeof LyricFlow !== 'undefined') ? LyricFlow.TR : { enter: 0.34, exit: 0.26, ease: 'ease-out', easeIn: 'ease-in' };
+    var node = el('div', 'position:absolute;left:0;top:0;transform:translate(-50%,-50%);white-space:nowrap;will-change:opacity;' + (css || ''), host);
+    node.textContent = text || '';
+    node.__text = text;
+    host.__cur = node;
+    if (cur) this.retire(cur, { dur: TR.exit, blur: false });
+    node.style.opacity = '0';
+    void node.offsetWidth;
+    node.style.transition = 'opacity ' + TR.enter + 's ' + TR.ease;
+    node.style.opacity = text ? String(peak == null ? 1 : peak) : '0';
   };
 
   StreamScene.prototype.onLine = function (s) {
@@ -388,7 +557,15 @@ var BuiltinLyricModes = (function () {
     var seed = (s.line && s.line.t || 0) + 1;
     var rnd = function () { var x = Math.sin(seed++) * 10000; return x - Math.floor(x); };
 
-    this.curEl.textContent = '';
+    // 旧句先脱离文档流（冻结在原地淡出），新句再占位，避免两行挤在一起
+    var oldLayer = this.curEl;
+    if (oldLayer && oldLayer.parentNode) {
+      this.detach(oldLayer, this.stage);
+      this.retire(oldLayer, { dur: 0.42, blur: 10 });
+    }
+
+    var layer = el('div', 'position:relative;display:flex;flex-wrap:wrap;align-items:center;justify-content:center;max-width:78%;opacity:0;will-change:transform,opacity;', this.stage);
+    this.curEl = layer;
     this.words = [];
     var words = lumiereWords(s.line);
     for (var i = 0; i < words.length; i++) {
@@ -397,7 +574,7 @@ var BuiltinLyricModes = (function () {
       var isFunction = single && LUMIERE_FUNCTION.indexOf(w.text) >= 0;
       var isPunct = /^[，。；！？、…·]+$/.test(w.text);
       var size = isPunct ? 0.62 : (isFunction ? 0.62 : (w.text.length >= 3 ? 1.45 : 0.85 + rnd() * 0.35));
-      var span = el('span', 'display:inline-block;white-space:pre;transition:color .25s linear,text-shadow .3s linear,opacity .3s linear;', this.curEl);
+      var span = el('span', 'display:inline-block;white-space:pre;transition:color .25s linear,text-shadow .3s linear,opacity .3s linear;', layer);
       span.textContent = w.text;
       span.style.fontSize = (heroPx * size) + 'px';
       span.style.fontWeight = size >= 1.45 ? '700' : '500';
@@ -408,17 +585,14 @@ var BuiltinLyricModes = (function () {
       this.words.push({ el: span, start: w.start, end: w.end, lit: false });
     }
 
+    // 入场进度由音频时钟驱动（onFrame 里算），这样暂停时不会继续播
+    this.enterAt = this.time;
+
     var basePx = Math.round(heroPx * 0.52);
-    if (this.prevEl) {
-      this.prevEl.textContent = (prevLine(s) || {}).text || '';
-      this.prevEl.style.fontSize = basePx + 'px';
-      this.prevEl.style.color = 'rgba(255,255,255,.5)';
-    }
-    if (this.nextEl) {
-      this.nextEl.textContent = nextText(s);
-      this.nextEl.style.fontSize = basePx + 'px';
-      this.nextEl.style.color = 'rgba(255,255,255,.55)';
-    }
+    this._swapText(this.prevHost, (prevLine(s) || {}).text || '',
+      'font-size:' + basePx + 'px;color:rgba(255,255,255,.5);filter:blur(.6px);', 0.4);
+    this._swapText(this.nextHost, nextText(s),
+      'font-size:' + basePx + 'px;color:rgba(255,255,255,.55);filter:blur(.6px);', 0.45);
 
     var tr = currentTr(s);
     var nx = nextText(s);
@@ -567,7 +741,14 @@ var BuiltinLyricModes = (function () {
       }
     }
     var breath = this.tun('breath', 6);
-    this.curEl.style.transform = 'translateY(' + (Math.sin(this.elapsed * 0.9) * breath * 0.5).toFixed(2) + 'px) scale(' + (1 + 0.012 * power).toFixed(3) + ')';
+    // 入场进度按音频时钟推进：预入场窗口内从 16px 下方浮上来，开口时正好落位
+    var enterDur = (typeof LyricFlow !== 'undefined') ? LyricFlow.TR.enter : 0.34;
+    var ep = this.enterAt == null ? 1 : clamp((this.time - this.enterAt) / enterDur, 0, 1);
+    var ee = 1 - Math.pow(1 - ep, 3);
+    if (this.curEl) {
+      this.curEl.style.opacity = ee.toFixed(3);
+      this.curEl.style.transform = 'translateY(' + ((1 - ee) * 16 + Math.sin(this.elapsed * 0.9) * breath * 0.5).toFixed(2) + 'px) scale(' + (0.985 + 0.015 * ee + 0.012 * power).toFixed(3) + ')';
+    }
   };
 
   StreamScene.prototype.applyTheme = function (c) {
@@ -657,15 +838,16 @@ var BuiltinLyricModes = (function () {
     var line = s.line;
     var old = this.lineEl;
     if (old && old.parentNode) {
-      old.style.transition = 'opacity .3s ease, transform .3s ease, filter .3s ease';
-      old.style.opacity = '0';
-      old.style.transform = 'scale(1.1)';
-      old.style.filter = 'blur(20px)';
-      setTimeout(function () { if (old.parentNode) old.parentNode.removeChild(old); }, 320);
+      // 退场交给音频时钟结算，暂停时不会继续删
+      this.retire(old, { dur: 0.30, blur: 18, transform: 'scale(1.12)' });
     }
     this.items = null;
     this.heroRing.style.opacity = '0';
     if (!line || !line.text) return;
+
+    // 本句的构建时刻（含预入场）：逐词幽灵轮廓从这一刻开始浮现
+    var lead = (typeof LyricFlow !== 'undefined') ? LyricFlow.leadOf(line, prevLine(s), this.flowLead) : 0;
+    this.buildAt = line.t - lead;
 
     var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
     var words = cadenzaWords(line);
@@ -696,7 +878,7 @@ var BuiltinLyricModes = (function () {
     this.heroIndex = heroIndex;
     this.heroScale = heroScale;
 
-    var layer = el('div', 'position:absolute;left:0;top:0;width:100%;height:0;opacity:0;transform:scale(.9);filter:blur(10px);transition:opacity .42s ease-out,transform .42s ease-out,filter .42s ease-out;', this.layer);
+    var layer = el('div', 'position:absolute;left:0;top:0;width:100%;height:0;opacity:0;transform:scale(.94);filter:blur(7px);transition:opacity .34s cubic-bezier(.22,1,.36,1),transform .34s cubic-bezier(.22,1,.36,1),filter .34s cubic-bezier(.22,1,.36,1);', this.layer);
     this.lineEl = layer;
     this.layer.appendChild(this.heroRing);
 
@@ -761,9 +943,12 @@ var BuiltinLyricModes = (function () {
       var blur = 0;
 
       if (state === 'waiting') {
-        scale = it.scale * 1.05 * 0.5;
-        rot = it.rot + 20;
-        blur = 10;
+        // 预入场：整句轮廓先以幽灵态浮现，再逐词点亮，不再从全黑里一个个蹦出来
+        var g = clamp((time - (this.buildAt == null ? time : this.buildAt) - i * 0.04) / 0.30, 0, 1);
+        scale = it.scale * (0.62 + 0.16 * g);
+        rot = it.rot + 20 * (1 - g);
+        blur = 9 * (1 - 0.35 * g);
+        opacity = 0.16 * g;
       } else if (state === 'active') {
         scale = it.scale * (it.isHero ? 1.3 : 1.18) * (1 + 0.04 * Math.sin(time * 10 + it.start * 5));
         opacity = 1;
@@ -899,9 +1084,10 @@ var BuiltinLyricModes = (function () {
     var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
     var old = this.lineEl;
     if (old && old.parentNode) {
-      old.style.transition = 'opacity .3s ease-out';
-      old.style.opacity = '0';
-      setTimeout(function () { if (old.parentNode) old.parentNode.removeChild(old); }, 320);
+      // 关键：先把旧列摘出文档流。否则两列并排 300ms，新句被挤偏半个屏宽，
+      // 旧列移除的瞬间整列"啪"地归位 —— 这是云阶最明显的横跳。
+      this.detach(old, this.floatEl);
+      this.retire(old, { dur: 0.30, blur: 8, transform: 'translate3d(0,-14px,0) scale(.96)' });
     }
     this.lineEl = null;
     this.rows = [];
@@ -1031,9 +1217,9 @@ var BuiltinLyricModes = (function () {
       if (status !== row.state) {
         row.state = status;
         row.el.style.transition = status === 'active'
-          ? 'transform .5s cubic-bezier(.2,.9,.25,1.1),opacity .1s linear'
-          : 'transform .4s ease-out,opacity .4s ease-out';
-        row.el.style.opacity = status === 'waiting' ? '0' : '1';
+          ? 'transform .42s cubic-bezier(.22,1,.36,1),opacity .24s ease-out'
+          : 'transform .34s cubic-bezier(.32,0,.67,0),opacity .28s ease-in';
+        row.el.style.opacity = '1';
         row.el.style.transform = 'translate3d(' + (row.cfg.x + (status === 'waiting' ? (row.left ? -40 : 40) : 0)).toFixed(1) + 'px,' + row.cfg.y.toFixed(1) + 'px,0) rotate(' + row.cfg.rotate + 'deg) scale(' + (status === 'waiting' ? 0.85 : 1) + ')';
         if (row.guideV) {
           var gcol = status === 'active' ? 'rgba(255,255,255,.55)' : (status === 'passed' ? 'rgba(255,255,255,.22)' : 'rgba(255,255,255,.14)');
@@ -1053,11 +1239,12 @@ var BuiltinLyricModes = (function () {
         if (st === it.state) continue;
         it.state = st;
         if (st === 'waiting') {
-          it.el.style.opacity = '0';
-          it.el.style.filter = 'blur(10px)';
+          // 幽灵态：整条阶梯在预入场期间就已就位，唱到哪个词哪个词亮
+          it.el.style.opacity = '0.18';
+          it.el.style.filter = 'blur(7px)';
           it.el.style.color = '#ffffff';
           it.el.style.textShadow = 'none';
-          it.el.style.transform = 'translate3d(' + (it.x + Math.sin(it.y) * 100).toFixed(1) + 'px,' + (it.y + Math.cos(it.x) * 50).toFixed(1) + 'px,0) rotate(' + (it.r + 20).toFixed(1) + 'deg) scale(.5)';
+          it.el.style.transform = 'translate3d(' + (it.x + Math.sin(it.y) * 100).toFixed(1) + 'px,' + (it.y + Math.cos(it.x) * 50).toFixed(1) + 'px,0) rotate(' + (it.r + 20).toFixed(1) + 'deg) scale(.62)';
         } else if (st === 'active') {
           it.el.style.opacity = '1';
           it.el.style.filter = 'none';
@@ -1140,119 +1327,188 @@ var BuiltinLyricModes = (function () {
     this.applyTheme(this.colors);
   };
 
+  CappellaScene.prototype._baseFont = function () {
+    var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
+    return clamp(18 * base, 15, 26);
+  };
+
+  /** 气泡配色：新建与换主题共用一份 */
+  CappellaScene.prototype._paint = function (rec) {
+    var c = this.colors;
+    var i = rec.index;
+    var right = rec.right;
+    var bubbleMix = right
+      ? mixNumeric(c.accent, c.primary, 0.18)
+      : mixNumeric(c.secondary, c.accent, 0.2 + (i % 9) / 8 * 0.6);
+    var bubbleBg = right ? bubbleMix : mixNumeric(bubbleMix, c.bg, 0.25);
+    rec.bubble.style.background = hex(bubbleBg);
+    rec.bubble.style.borderColor = cssRgba(mixNumeric(bubbleBg, 0xffffff, 0.22), 0.3);
+    rec.bubble.style.color = right ? hex(c.bg) : '#ffffff';
+    if (rec.avatar && !rec.avatar.style.backgroundImage) {
+      rec.avatar.style.background = this.tun('avatarSource', 'builtin') === 'theme'
+        ? 'linear-gradient(135deg, ' + hex(c.accent) + ', ' + hex(c.secondary) + ')'
+        : 'linear-gradient(135deg, ' + hex(c.primary) + ', ' + hex(c.secondary) + ')';
+    }
+  };
+
+  CappellaScene.prototype._findRow = function (index) {
+    for (var i = 0; i < this.rows.length; i++) if (this.rows[i].index === index) return this.rows[i];
+    return null;
+  };
+
+  CappellaScene.prototype._createRow = function (s, i) {
+    var lines = s.lines || [];
+    var line = lines[i];
+    if (!line || !line.text) return null;
+    var baseFont = this._baseFont();
+    var avatarSource = this.tun('avatarSource', 'builtin');
+    var avatarSrc = this.tun('customAvatar', '');
+    var right = i % 2 === 1;
+
+    var row = el('div', 'display:flex;align-items:flex-end;gap:12px;width:100%;justify-content:' + (right ? 'flex-end' : 'flex-start') + ';opacity:0;', this.feed);
+    var group = el('div', 'display:flex;align-items:flex-end;gap:12px;max-width:68%;transform-origin:' + (right ? 'right bottom' : 'left bottom') + ';transition:transform .34s cubic-bezier(.22,1,.36,1),opacity .3s ease;', row);
+    group.style.transform = 'scale(.92)';
+    group.style.opacity = '0.82';
+
+    var bubble = el('div', 'position:relative;display:flex;align-items:flex-start;border:1px solid;border-radius:24px;', group);
+    bubble.style.borderBottomLeftRadius = right ? '24px' : '6px';
+    bubble.style.borderBottomRightRadius = right ? '6px' : '24px';
+    bubble.style.padding = '12px 16px';
+    bubble.style.minHeight = '44px';
+    bubble.style.transition = 'padding .34s cubic-bezier(.22,1,.36,1),min-height .34s cubic-bezier(.22,1,.36,1),box-shadow .34s ease,background .3s ease,border-color .3s ease';
+    bubble.style.maxWidth = Math.max(96, Math.floor(Math.min(this.width - 32, 896) * (this.width >= 640 ? 0.68 : 0.78) - 56)) + 'px';
+
+    var text = el('div', 'line-height:1.45;word-break:break-word;', bubble);
+    text.style.fontWeight = '500';
+    text.style.transition = 'font-size .34s cubic-bezier(.22,1,.36,1)';
+    text.textContent = line.text;
+
+    var stamp = el('div', 'position:absolute;bottom:4px;font-size:11px;font-weight:500;color:rgba(255,255,255,.62);white-space:nowrap;', group);
+    stamp.textContent = cappellaTime(line.t);
+    stamp.style[right ? 'right' : 'left'] = 'calc(100% + 8px)';
+
+    var avatar = el('div', 'width:40px;height:40px;border-radius:50%;flex:0 0 40px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;border:1px solid rgba(255,255,255,.24);box-shadow:0 8px 24px rgba(0,0,0,.35);background-size:cover;background-position:center;overflow:hidden;', group);
+    if (right) bubble.parentNode.insertBefore(avatar, bubble.nextSibling);
+    if (avatarSource === 'custom' && avatarSrc) {
+      avatar.style.backgroundImage = 'url(' + avatarSrc + ')';
+    } else if (avatarSource === 'cover' && s.coverUrl) {
+      avatar.style.backgroundImage = 'url(' + s.coverUrl + ')';
+    } else {
+      avatar.textContent = Array.from(line.text)[0] || '♪';
+    }
+
+    var rec = {
+      index: i, line: line, right: right, active: false, chars: [], emoji: null,
+      el: row, group: group, bubble: bubble, text: text, stamp: stamp, avatar: avatar
+    };
+    this._paint(rec);
+    this.rows.push(rec);
+    this.rows.sort(function (a, b) { return a.index - b.index; });
+    return rec;
+  };
+
+  CappellaScene.prototype._promote = function (rec, s) {
+    var baseFont = this._baseFont();
+    var isNew = !rec.active && rec.chars.length === 0;
+
+    rec.active = true;
+    rec.group.style.transform = 'scale(1.12)';
+    rec.group.style.opacity = '1';
+    rec.bubble.style.padding = '16px 20px';
+    rec.bubble.style.minHeight = '64px';
+    rec.bubble.style.boxShadow = '0 18px 48px ' + cssRgba(mixNumeric(this.colors.bg, this.colors.accent, 0.2), 0.34);
+    rec.text.style.fontSize = Math.round(baseFont * 1.34) + 'px';
+
+    if (isNew) {
+      // 逐字点亮只建一次，之后晋级/降级都不再重建节点
+      rec.text.textContent = '';
+      var chars = rec.line.chars && rec.line.chars.length ? rec.line.chars : fallbackChars(rec.line);
+      for (var c = 0; c < chars.length; c++) {
+        if (chars[c].text === undefined || chars[c].text === '') continue;
+        var chSpan = document.createElement('span');
+        chSpan.textContent = chars[c].text;
+        chSpan.style.cssText = 'opacity:0;transition:opacity .22s ease-out;';
+        rec.text.appendChild(chSpan);
+        rec.chars.push({ el: chSpan, start: chars[c].start });
+      }
+      this.enter(rec.el, { from: 'translateY(22px)' });
+      if (this.tun('showEmoji', true) && !rec.emoji) {
+        rec.emoji = el('div', 'position:absolute;top:-14px;' + (rec.right ? 'right:-8px;' : 'left:-8px;') + 'font-size:20px;opacity:.9;pointer-events:none;', rec.bubble);
+        var emojiSrc = this.tun('customEmoji', '');
+        if (this.tun('emojiSource', 'builtin') === 'custom' && emojiSrc) {
+          var im = el('img', 'width:26px;height:26px;object-fit:contain;display:block;', rec.emoji);
+          im.src = emojiSrc;
+        } else {
+          rec.emoji.textContent = '✨';
+        }
+      }
+    }
+
+    this.activeRow = rec;
+    this.activeBubble = rec.group;
+    this.activeChars = rec.chars;
+    this.emojiEl = rec.emoji;
+  };
+
+  CappellaScene.prototype._demote = function (rec) {
+    if (!rec.active) return;
+    var baseFont = this._baseFont();
+    rec.active = false;
+    rec.group.style.transform = 'scale(.92)';
+    rec.group.style.opacity = '0.82';
+    rec.bubble.style.padding = '12px 16px';
+    rec.bubble.style.minHeight = '44px';
+    rec.bubble.style.boxShadow = '0 8px 24px rgba(0,0,0,.28)';
+    rec.text.style.fontSize = Math.round(baseFont * 0.94) + 'px';
+    if (rec.emoji) {
+      if (rec.emoji.parentNode) rec.emoji.parentNode.removeChild(rec.emoji);
+      rec.emoji = null;
+    }
+    if (rec.chars.length) {
+      rec.text.textContent = rec.line.text;
+      rec.chars = [];
+    }
+  };
+
   CappellaScene.prototype.build = function (s) {
     var lines = s.lines || [];
-    this.feed.textContent = '';
-    this.activeBubble = null;
+    if (!this.rows) this.rows = [];
     this.activeChars = [];
+    this.activeBubble = null;
     this.emojiEl = null;
     if (s.index < 0 || !lines.length) return;
 
-    var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
-    var baseFont = clamp(18 * base, 15, 26);
-    var avatarSource = this.tun('avatarSource', 'builtin');
-    var avatarSrc = this.tun('customAvatar', '');
+    var beforeTop = this.feed.getBoundingClientRect().top;
     var from = Math.max(0, s.index - 5);
 
-    for (var i = from; i <= s.index; i++) {
-      var line = lines[i];
-      if (!line || !line.text) continue;
-      var isActive = i === s.index;
-      var right = i % 2 === 1;
-      var bubbleMix = right
-        ? mixNumeric(this.colors.accent, this.colors.primary, 0.18)
-        : mixNumeric(this.colors.secondary, this.colors.accent, 0.2 + (i % 9) / 8 * 0.6);
-      var bubbleBg = right ? bubbleMix : mixNumeric(bubbleMix, this.colors.bg, 0.25);
-      var bubbleBorder = mixNumeric(bubbleBg, 0xffffff, 0.22);
-      var bubbleFg = right ? hex(this.colors.bg) : '#ffffff';
-
-      var row = el('div', 'display:flex;align-items:flex-end;gap:12px;width:100%;justify-content:' + (right ? 'flex-end' : 'flex-start') + ';', this.feed);
-      var group = el('div', 'display:flex;align-items:flex-end;gap:12px;max-width:68%;transform-origin:' + (right ? 'right bottom' : 'left bottom') + ';transition:transform .3s cubic-bezier(.2,.9,.25,1.1),opacity .3s ease;', row);
-
-      var bubble = el('div', 'position:relative;display:flex;align-items:flex-start;', group);
-      bubble.style.background = hex(bubbleBg);
-      bubble.style.border = '1px solid ' + cssRgba(bubbleBorder, 0.3);
-      bubble.style.color = bubbleFg;
-      bubble.style.boxShadow = isActive
-        ? '0 18px 48px ' + cssRgba(mixNumeric(this.colors.bg, this.colors.accent, 0.2), 0.34)
-        : '0 8px 24px rgba(0,0,0,.28)';
-      bubble.style.borderRadius = '24px';
-      bubble.style.borderBottomLeftRadius = right ? '24px' : '6px';
-      bubble.style.borderBottomRightRadius = right ? '6px' : '24px';
-      bubble.style.padding = isActive ? '16px 20px' : '12px 16px';
-      bubble.style.minHeight = (isActive ? 64 : 44) + 'px';
-      bubble.style.minWidth = isActive ? '72px' : '0';
-      bubble.style.maxWidth = Math.max(96, Math.floor(Math.min(this.width - 32, 896) * (this.width >= 640 ? 0.68 : 0.78) - 56)) + 'px';
-
-      var text = el('div', 'line-height:1.45;word-break:break-word;', bubble);
-      text.style.fontSize = Math.round(baseFont * (isActive ? 1.34 : 0.94)) + 'px';
-      text.style.fontWeight = '500';
-
-      if (isActive) {
-        var chars = line.chars && line.chars.length ? line.chars : fallbackChars(line);
-        for (var c = 0; c < chars.length; c++) {
-          if (chars[c].text === undefined) continue;
-          var chSpan = document.createElement('span');
-          chSpan.textContent = chars[c].text;
-          if (chars[c].text === '') continue;
-          chSpan.style.cssText = 'opacity:0;transition:opacity .22s ease-out;';
-          text.appendChild(chSpan);
-          this.activeChars.push({ el: chSpan, start: chars[c].start });
-        }
-        this.activeBubble = group;
-      } else {
-        text.textContent = line.text;
+    // 1) 滑出窗口的旧气泡直接移除（被 stage 的 overflow:hidden 裁掉，不需要淡出）
+    for (var r = this.rows.length - 1; r >= 0; r--) {
+      if (this.rows[r].index < from) {
+        var dead = this.rows[r].el;
+        if (dead.parentNode) dead.parentNode.removeChild(dead);
+        this.rows.splice(r, 1);
       }
+    }
 
-      // 时间戳贴在气泡外侧
-      var stamp = el('div', 'position:absolute;bottom:4px;font-size:11px;font-weight:500;color:rgba(255,255,255,.62);white-space:nowrap;', group);
-      stamp.textContent = cappellaTime(line.t);
-      stamp.style[right ? 'right' : 'left'] = 'calc(100% + 8px)';
+    // 2) 已有行降级为历史态 —— 不再整列重建
+    for (var i = 0; i < this.rows.length; i++) {
+      if (this.rows[i].index !== s.index) this._demote(this.rows[i]);
+    }
 
-      // 头像
-      var avatar = el('div', 'width:40px;height:40px;border-radius:50%;flex:0 0 40px;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:#fff;border:1px solid rgba(255,255,255,.24);box-shadow:0 8px 24px rgba(0,0,0,.35);background-size:cover;background-position:center;overflow:hidden;', group);
-      if (right) bubble.parentNode.insertBefore(avatar, bubble.nextSibling);
-      if (avatarSource === 'custom' && avatarSrc) {
-        avatar.style.backgroundImage = 'url(' + avatarSrc + ')';
-      } else if (avatarSource === 'cover' && s.coverUrl) {
-        avatar.style.backgroundImage = 'url(' + s.coverUrl + ')';
-      } else {
-        avatar.textContent = Array.from(line.text)[0] || '♪';
-        avatar.style.background = avatarSource === 'theme'
-          ? 'linear-gradient(135deg, ' + hex(this.colors.accent) + ', ' + hex(this.colors.secondary) + ')'
-          : 'linear-gradient(135deg, ' + hex(this.colors.primary) + ', ' + hex(this.colors.secondary) + ')';
-      }
+    // 3) 当前行：存在就晋级，不存在才新建
+    var row = this._findRow(s.index);
+    if (!row) row = this._createRow(s, s.index);
+    if (row) this._promote(row, s);
 
-      if (isActive) {
-        group.style.transform = 'scale(1.12)';
-        if (this.tun('showEmoji', true)) {
-          this.emojiEl = el('div', 'position:absolute;top:-14px;' + (right ? 'right:-8px;' : 'left:-8px;') + 'font-size:20px;opacity:.9;pointer-events:none;', bubble);
-          var emojiSrc = this.tun('customEmoji', '');
-          if (this.tun('emojiSource', 'builtin') === 'custom' && emojiSrc) {
-            var im = el('img', 'width:26px;height:26px;object-fit:contain;display:block;', this.emojiEl);
-            im.src = emojiSrc;
-          } else {
-            this.emojiEl.textContent = '✨';
-          }
-        }
-      } else {
-        group.style.transform = 'scale(.92)';
-        group.style.opacity = '0.82';
-      }
-
-      // 新的一条从上往下浮入
-      if (i === s.index) {
-        row.style.opacity = '0';
-        row.style.transform = 'translateY(22px)';
-        row.style.transition = 'opacity .32s ease-out,transform .32s ease-out';
-        requestAnimationFrame(function (target) {
-          return function () {
-            if (!target.parentNode) return;
-            target.style.opacity = '1';
-            target.style.transform = 'translateY(0px)';
-          };
-        }(row));
-      }
+    // 4) 增删气泡会让整列瞬移一格，用 FLIP 补一次滚动
+    var afterTop = this.feed.getBoundingClientRect().top;
+    var dy = beforeTop - afterTop;
+    if (Math.abs(dy) > 0.5) {
+      this.feed.style.transition = 'none';
+      this.feed.style.transform = 'translateY(' + dy.toFixed(1) + 'px)';
+      void this.feed.offsetHeight;
+      this.feed.style.transition = 'transform .34s cubic-bezier(.22,1,.36,1)';
+      this.feed.style.transform = 'translateY(0)';
     }
   };
 
@@ -1274,6 +1530,9 @@ var BuiltinLyricModes = (function () {
   };
 
   CappellaScene.prototype.applyTheme = function (c) {
+    if (this.rows) {
+      for (var i = 0; i < this.rows.length; i++) this._paint(this.rows[i]);
+    }
     if (this.subText) {
       this.subText.style.color = hex(c.secondary);
       this.subText.style.fontSize = Math.round(clamp(0.02 * this.width, 18, 21) * (this.noCommonFontScale ? 1 : (this.fontScale || 1))) + 'px';
@@ -1379,8 +1638,9 @@ var BuiltinLyricModes = (function () {
     var line = s.line;
     var old = this.lineEl;
     if (old && old.parentNode) {
-      old.style.opacity = '0';
-      setTimeout(function () { if (old.parentNode) old.parentNode.removeChild(old); }, 460);
+      // 与云阶同源的问题：旧列淡出 450ms 里仍占 flex 位，新旧两列并排后横跳
+      this.detach(old, this.stage);
+      this.retire(old, { dur: 0.30, blur: 9, transform: 'translate3d(0,-12px,0)' });
     }
     this.lineEl = null;
     this.segments = [];
@@ -1440,9 +1700,8 @@ var BuiltinLyricModes = (function () {
       };
     });
 
-    var col = el('div', 'position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;opacity:0;transition:opacity .45s ease-in-out;', this.stage);
+    var col = el('div', 'position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;opacity:0;will-change:opacity,transform;', this.stage);
     this.lineEl = col;
-    requestAnimationFrame(function () { if (col.parentNode) col.style.opacity = '1'; });
 
     for (var k = 0; k < texts.length; k++) {
       var isTiltLine = k === tiltIndex;
@@ -1450,7 +1709,7 @@ var BuiltinLyricModes = (function () {
       var px = basePx * scaleMul * boost;
       var tiltPx = Math.min(this.width * 0.06875 * scaleMul, 90 * base * scaleMul);
       var yOffset = tiltPx / 6;
-      var lineEl = el('div', 'white-space:nowrap;text-align:center;opacity:0;transform:translateY(' + (isTiltLine ? 24 : 20) + 'px)' + (isTiltLine ? ' scale(.92)' : '') + ';transition:opacity .55s cubic-bezier(.25,.46,.45,.94),transform .55s cubic-bezier(.25,.46,.45,.94);', col);
+      var lineEl = el('div', 'white-space:nowrap;text-align:center;opacity:0;transform:translateY(' + (isTiltLine ? 22 : 18) + 'px)' + (isTiltLine ? ' scale(.94)' : '') + ';transition:opacity .42s cubic-bezier(.22,1,.36,1),transform .42s cubic-bezier(.22,1,.36,1);', col);
       lineEl.style.fontSize = px + 'px';
       lineEl.style.fontWeight = isTiltLine ? '300' : '400';
       lineEl.style.letterSpacing = isTiltLine ? '0.15em' : '0.08em';
@@ -1468,8 +1727,9 @@ var BuiltinLyricModes = (function () {
         if (!isSpace) visualIndex++;
         var span = document.createElement('span');
         span.textContent = isSpace ? '\u00A0' : graphemes[g];
-        span.style.cssText = 'display:inline-block;opacity:0;transition:opacity .5s cubic-bezier(.25,.46,.45,.94),transform .06s ease-out;';
-        span.style.transitionDelay = (!isSpace ? (ci * (isTiltLine ? 0.05 : 0.04)) : 0) + 's,0s';
+        span.style.cssText = 'display:inline-block;opacity:0;transition:opacity .38s cubic-bezier(.22,1,.36,1),transform .06s ease-out;';
+        // 逐字延迟压到 0.022s/字、总长封顶 0.16s：长句最后一个字不再迟到 1s
+        span.style.transitionDelay = (!isSpace && ci < 8 ? Math.min(0.16, ci * 0.022) : 0) + 's,0s';
         if (isSpace) span.style.minWidth = isTiltLine ? '0.35em' : '0.25em';
         if (isTiltLine) span.style.transform = 'translateY(' + (isSpace ? 0 : stagger * yOffset * 2).toFixed(1) + 'px)';
         lineEl.appendChild(span);
@@ -1503,6 +1763,9 @@ var BuiltinLyricModes = (function () {
         charCursor++;
       }
     }
+
+    // 整列淡入：在预入场窗口内完成，开口时已经站定
+    this.enter(col, { from: 'translateY(10px)', dur: (typeof LyricFlow !== 'undefined') ? LyricFlow.TR.enter : 0.34 });
   };
 
   function getTiltColor(isTilt, mode, c) {
@@ -1515,27 +1778,26 @@ var BuiltinLyricModes = (function () {
     if (!this.segments || !this.segments.length) return;
     var time = s.time;
     var line = this.line;
-    var visibleUntil = -1;
-    for (var i = 0; i < this.segments.length; i++) {
-      if (time >= this.segments[i].start - 0.25) visibleUntil = i;
-    }
-    if (line && (time < line.t - 0.1 || time > (line.end || line.timingEnd))) visibleUntil = -1;
-
+    // 段级：建好即在场，未唱的段以幽灵态垫底，唱到再提亮 —— 预入场不再空屏
+    var gone = line && time > (line.end || line.timingEnd) + 2.5;
     for (var k = 0; k < this.segments.length; k++) {
       var seg = this.segments[k];
-      var shouldShow = k <= visibleUntil;
-      if (shouldShow !== seg.visible) {
-        seg.visible = shouldShow;
-        seg.el.style.opacity = shouldShow ? '1' : '0';
-        seg.el.style.transform = shouldShow ? 'translateY(0px) scale(1)' : ('translateY(' + (seg.tilt ? 24 : 20) + 'px)' + (seg.tilt ? ' scale(.92)' : ''));
-        for (var c = 0; c < seg.chars.length; c++) {
-          seg.chars[c].el.style.opacity = shouldShow ? '1' : '0';
-        }
+      var state = gone ? 'gone' : 'on';
+      if (state !== seg.visState) {
+        seg.visState = state;
+        seg.el.style.opacity = state === 'gone' ? '0' : '1';
+        seg.el.style.transform = state === 'gone'
+          ? ('translateY(' + (seg.tilt ? 24 : 20) + 'px)' + (seg.tilt ? ' scale(.92)' : ''))
+          : 'translateY(0px) scale(1)';
       }
-      if (!shouldShow) continue;
+      if (gone) continue;
       for (var m = 0; m < seg.chars.length; m++) {
         var ch = seg.chars[m];
         if (ch.isSpace || !ch.charTiming) continue;
+        var lit = time >= ch.charTiming.start;
+        var targetOp = lit ? '1' : '0.34';
+        if (ch.op !== targetOp) { ch.op = targetOp; ch.el.style.opacity = targetOp; }
+        if (!lit) continue;
         var pulse = tiltPulse(time, ch.charTiming);
         var scale = Math.round((1 + pulse * (seg.tilt ? 0.18 : 0.15)) * 1000) / 1000;
         if (scale === ch.scale) continue;
@@ -1720,14 +1982,19 @@ var BuiltinLyricModes = (function () {
     g.textBaseline = 'middle';
     g.font = '700 ' + fontPx + 'px ' + ((typeof LyricTunings !== 'undefined') ? LyricTunings.fontStack() : FONT);
 
-    for (var li = idx - 4; li <= idx + 4; li++) {
+    // 用连续索引 offset 定位：换行时整列平滑上移，不再"跳一格"
+    var off = this.offset;
+    for (var li = Math.floor(off) - 4; li <= Math.ceil(off) + 4; li++) {
       var line = lines[li];
       if (!line || !line.text) continue;
-      var dist = li - idx;
-      var isCurrent = dist === 0;
+      var dist = li - off;
+      var adist = Math.abs(dist);
+      if (adist > 4.6) continue;
+      var isCurrent = li === idx;
       var rows = fumeWrap(g, line.text, maxWidth, fontPx);
       var blockH = rows.length * lineHeight;
       var top = h * 0.5 + dist * (blockH + lineHeight * 0.9) + breathe - blockH / 2;
+      var fade = 1 - clamp((adist - 3.2) / 1.4, 0, 1);
 
       for (var r = 0; r < rows.length; r++) {
         var row = rows[r];
@@ -1754,12 +2021,12 @@ var BuiltinLyricModes = (function () {
               g.shadowColor = cssRgba(c.accent, 0.55 * glow);
               g.shadowBlur = (4 + fontPx * 0.22) * (1 - trail * 0.6) * glow;
             } else {
-              g.globalAlpha = 0.06;
+              g.globalAlpha = 0.10;
               g.fillStyle = hex(c.primary);
               g.shadowBlur = 0;
             }
           } else {
-            g.globalAlpha = dist === -1 || dist === 1 ? 0.07 : 0.045;
+            g.globalAlpha = (0.045 + 0.05 * Math.max(0, 1 - adist)) * fade;
             g.fillStyle = hex(c.primary);
             g.shadowBlur = 0;
           }
@@ -1835,13 +2102,66 @@ var BuiltinLyricModes = (function () {
     this.applyTheme(this.colors);
   };
 
-  MonetScene.prototype.buildRail = function (s) {
-    this.rail.textContent = '';
-    this.railItems = [];
-    this.activeChars = null;
+  /** 轨道上的一个歌词块：按行索引缓存，换行只改 transform，滚动是真的在动 */
+  MonetScene.prototype.blockFor = function (i, s) {
     var lines = s.lines || [];
+    var line = lines[i];
+    if (!line || !line.text) return null;
+    var px = this.lyricPx;
+    var map = this.railBlocks || (this.railBlocks = {});
+    if (map[i]) return map[i];
+
+    var block = el('div', 'position:absolute;left:0;right:0;top:0;will-change:transform,opacity,filter;opacity:0;', this.rail);
+    block.style.transformOrigin = 'left center';
+
+    var text = el('div', 'line-height:1.3;', block);
+    text.style.fontSize = px + 'px';
+    text.style.fontWeight = '600';
+
+    // 每个块都预先建好逐字 span：等它走到中心时不需要重建 DOM
+    var chars = line.chars && line.chars.length ? line.chars : fallbackChars(line);
+    var charViews = [];
+    for (var c = 0; c < chars.length; c++) {
+      var span = document.createElement('span');
+      span.textContent = chars[c].text;
+      span.style.cssText = 'color:rgba(255,255,255,.4);transition:color .2s linear,text-shadow .3s linear;';
+      text.appendChild(span);
+      charViews.push({ el: span, start: chars[c].start });
+    }
+
+    var tr = null;
+    if (!s.opts || s.opts.translation !== false) {
+      tr = el('div', 'line-height:1.4;margin-top:' + Math.round(px * 0.14) + 'px;', block);
+      tr.style.fontSize = Math.round(px * 0.46) + 'px';
+      tr.style.color = 'rgba(255,255,255,.42)';
+      tr.style.fontWeight = '500';
+      tr.textContent = line.tr || '';
+      tr.style.display = line.tr ? '' : 'none';
+    }
+
+    var rec = { index: i, line: line, el: block, text: text, tr: tr, chars: charViews, placed: false };
+    map[i] = rec;
+    return rec;
+  };
+
+  MonetScene.prototype.buildRail = function (s) {
+    this.activeChars = null;
+    this.activeTr = null;
+    var lines = s.lines || [];
+    if (!this.railBlocks) this.railBlocks = {};
     if (s.index < 0 || !lines.length) return;
     var px = this.lyricPx;
+
+    // 字号变了（缩放/调参）就整池作废，否则块会停在旧字号上
+    if (this._railPx !== px) {
+      for (var k in this.railBlocks) {
+        var old = this.railBlocks[k];
+        if (old.el.parentNode) old.el.parentNode.removeChild(old.el);
+      }
+      this.railBlocks = {};
+      this._railPx = px;
+    }
+
     var railH = this.rail.clientHeight || this.height * 0.52;
     var blockH = px * 1.35 + (s.opts && s.opts.translation === false ? 0 : px * 0.86);
     var gap = Math.max(18, px * 0.49);
@@ -1850,66 +2170,44 @@ var BuiltinLyricModes = (function () {
     var acc = 0;
     for (var d = 1; d <= 2; d++) { acc += blockH + gap; offsets[d] = acc; offsets[-d] = -acc; }
 
+    var keep = {};
     for (var i = s.index - 2; i <= s.index + 2; i++) {
-      var line = lines[i];
-      if (!line || !line.text) continue;
+      var rec = this.blockFor(i, s);
+      if (!rec) continue;
+      keep[i] = true;
+
       var dist = i - s.index;
-      var block = el('div', 'position:absolute;left:0;right:0;will-change:transform,opacity,filter;', this.rail);
-      block.style.top = (centerY + offsets[dist]) + 'px';
-      block.style.transform = 'translateY(-50%)';
-      block.style.transition = 'transform .5s cubic-bezier(.32,.72,0,1), opacity .35s ease, filter .35s ease';
+      var adist = Math.abs(dist);
+      var scale = dist === 0 ? 1 : (adist === 1 ? 0.95 : 0.9);
+      var opacity = dist === 0 ? 1 : (dist < 0 ? (adist === 1 ? 0.52 : 0.4) : (dist === 1 ? 0.72 : 0.54));
+      var blur = dist === 0 ? 0 : (dist < 0 ? 1.1 + 0.7 * (adist - 1) : 0.7 + 0.9 * (dist - 1));
+      var ty = centerY + offsets[dist];
+      var isNew = !rec.placed;
 
-      var text = el('div', 'line-height:1.3;', block);
-      text.style.fontSize = px + 'px';
-      text.style.fontWeight = '600';
+      rec.el.style.transition = isNew
+        ? 'opacity .42s ease,filter .42s ease'
+        : 'transform .52s cubic-bezier(.32,.72,0,1),opacity .38s ease,filter .38s ease';
+      rec.el.style.transform = 'translateY(' + ty + 'px) translateY(-50%) scale(' + scale + ')';
+      if (isNew) {
+        void rec.el.offsetWidth;      // 先让初始位置落定，再淡入
+        rec.el.style.opacity = '0';
+      }
+      rec.el.style.opacity = String(opacity);
+      rec.el.style.filter = blur > 0.1 ? 'blur(' + blur.toFixed(1) + 'px)' : 'none';
+      rec.placed = true;
 
       if (dist === 0) {
-        var chars = line.chars && line.chars.length ? line.chars : fallbackChars(line);
-        var charViews = [];
-        for (var c = 0; c < chars.length; c++) {
-          var span = document.createElement('span');
-          span.textContent = chars[c].text;
-          span.style.cssText = 'color:rgba(255,255,255,.4);transition:color .2s linear,text-shadow .3s linear;';
-          text.appendChild(span);
-          charViews.push({ el: span, start: chars[c].start });
-        }
-        this.activeChars = charViews;
-      } else {
-        text.textContent = line.text;
-        text.style.color = dist < 0 ? 'rgba(255,255,255,.52)' : 'rgba(255,255,255,.72)';
+        this.activeChars = rec.chars;
+        this.activeTr = rec.tr;
       }
+    }
 
-      if (!s.opts || s.opts.translation !== false) {
-        var tr = el('div', 'line-height:1.4;margin-top:' + Math.round(px * 0.14) + 'px;', block);
-        tr.style.fontSize = Math.round(px * 0.46) + 'px';
-        tr.style.color = 'rgba(255,255,255,.42)';
-        tr.style.fontWeight = '500';
-        tr.textContent = line.tr || '';
-        tr.style.display = line.tr ? '' : 'none';
-        if (dist === 0) this.activeTr = tr;
+    // 滑出窗口的块：交给退场队列
+    for (var key in this.railBlocks) {
+      if (!keep[key]) {
+        this.retire(this.railBlocks[key].el, { dur: 0.34, blur: 4 });
+        delete this.railBlocks[key];
       }
-
-      var scale = dist === 0 ? 1 : (Math.abs(dist) === 1 ? 0.95 : 0.9);
-      var opacity = dist === 0 ? 1 : (dist < 0 ? (Math.abs(dist) === 1 ? 0.52 : 0.4) : (dist === 1 ? 0.72 : 0.54));
-      var blur = dist === 0 ? 0 : (dist < 0 ? 1.1 + 0.7 * (Math.abs(dist) - 1) : 0.7 + 0.9 * (dist - 1));
-      block.style.opacity = opacity;
-      block.style.filter = blur > 0.1 ? 'blur(' + blur.toFixed(1) + 'px)' : 'none';
-      block.style.transform = 'translateY(-50%) scale(' + scale + ')';
-      block.style.transformOrigin = 'left center';
-
-      if (dist === 0) {
-        block.style.opacity = '0';
-        block.style.transform = 'translateY(calc(-50% + 24px))';
-        requestAnimationFrame(function (target) {
-          return function () {
-            if (!target.parentNode) return;
-            target.style.opacity = '1';
-            target.style.transform = 'translateY(-50%) scale(1)';
-          };
-        }(block));
-      }
-
-      this.railItems.push(block);
     }
   };
 
@@ -1972,7 +2270,7 @@ var BuiltinLyricModes = (function () {
   };
 
   MonetScene.prototype.dispose = function () {
-    this.railItems = null;
+    this.railBlocks = null;
     this.activeChars = null;
     Scene.prototype.dispose.call(this);
   };
@@ -2020,8 +2318,13 @@ var BuiltinLyricModes = (function () {
 
   CladdaghScene.prototype.build = function (s) {
     var line = s.line;
+    var oldLayer = this.ringLayer;
+    if (oldLayer && oldLayer.parentNode) {
+      // 旧环不再瞬删：交叉淡出，避免"整圈字凭空消失"
+      this.retire(oldLayer, { dur: 0.34, blur: 6 });
+    }
     this.items = null;
-    this.ring.innerHTML = '';
+    this.ringLayer = null;
     if (!line || !line.text) return;
 
     var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
@@ -2031,7 +2334,12 @@ var BuiltinLyricModes = (function () {
     var tracking = fontPx * 0.26;
     this.rx = rx;
     this.fontPx = fontPx;
-    this.ring.style.fontSize = fontPx + 'px';
+
+    var layer = el('div', 'position:absolute;left:0;top:0;width:0;height:0;', this.ring);
+    layer.style.fontSize = fontPx + 'px';
+    layer.style.fontWeight = '700';
+    layer.style.letterSpacing = '.04em';
+    this.ringLayer = layer;
 
     var chars = line.chars && line.chars.length ? line.chars : fallbackChars(line);
     var totalWidth = 0;
@@ -2052,10 +2360,10 @@ var BuiltinLyricModes = (function () {
       var node = document.createElement('span');
       node.textContent = chars[c].text;
       node.style.cssText = 'position:absolute;left:0;top:0;display:inline-block;white-space:pre;will-change:transform,opacity,filter;';
-      this.ring.appendChild(node);
+      layer.appendChild(node);
       this.items.push({ el: node, nominal: nominal, start: chars[c].start, end: chars[c].end });
     }
-    this.spinAt = this.elapsed;
+    this.spinAt = this.time;
   };
 
   CladdaghScene.prototype.onFrame = function (dt, s) {
@@ -2092,9 +2400,9 @@ var BuiltinLyricModes = (function () {
     var angleB = items[Math.min(lo + 1, last)].nominal;
     var off = angleA + (angleB - angleA) * fr;
 
-    // 换行时从背后转进来
-    var spinP = Math.min(1, Math.max(0, (this.elapsed - (this.spinAt || 0)) / 1));
-    var spin = Math.PI * (1 - (1 - Math.pow(1 - spinP, 3)));
+    // 换行时从背后转进来：用音频时钟、0.62s 内收完，开口时已经转到正面
+    var spinP = Math.min(1, Math.max(0, (time - (this.spinAt || 0)) / 0.62));
+    var spin = Math.PI * 0.86 * (1 - (1 - Math.pow(1 - spinP, 3)));
     var power = powerOf(s);
 
     for (var k = 0; k < items.length; k++) {
@@ -2280,26 +2588,33 @@ var BuiltinLyricModes = (function () {
       g.shadowBlur = 0;
     }
 
-    // 歌词平面：当前行最近最大，前后行向远处收缩并变淡
+    // 歌词平面：按连续索引 offset 插值，换行时整块平滑后撤，不再硬跳一格
     var fontPx = clamp(minSide * 0.086, 26, 82) * base;
+    var offD = this.offset;
     var drawn = [];
-    for (var li = idx - 2; li <= idx + 2; li++) drawn.push(li);
+    for (var li = Math.floor(offD) - 2; li <= Math.ceil(offD) + 2; li++) drawn.push(li);
     for (var di = 0; di < drawn.length; di++) {
       var lineIdx = drawn[di];
       var line = lines[lineIdx];
       if (!line || !line.text) continue;
-      var dist = lineIdx - idx;
-      var depthScale = dist === 0 ? 1 : 1 / (1 + Math.abs(dist) * 1.35);
-      var pxSize = fontPx * depthScale * (dist === 0 ? (0.95 + 0.05 * Math.sin(this.elapsed * 1.9)) : 1);
-      var alpha = dist === 0 ? 1 : (dist === -1 ? 0.3 : (dist === -2 ? 0.1 : (dist === 1 ? 0.34 : 0.16)));
-      var baseY = cy + dist * (fontPx * 0.95) - (dist === 0 ? 0 : 0);
-      var baseX = cx + (dist === 0 ? -w * 0.06 : w * 0.02) * motion;
-      var roll = dist === 0 ? -0.05 : (dist < 0 ? 0.1 : -0.09);
+      var dist = lineIdx - offD;
+      var adist = Math.abs(dist);
+      if (adist > 2.8) continue;
+      // cur：离中心越近越"当前"，用于在远景和当前行之间连续过渡
+      var cur = Math.max(0, 1 - adist * 2.2);
+      var depthScale = 1 / (1 + adist * 1.35);
+      var pxSize = fontPx * depthScale * (0.95 + 0.05 * Math.sin(this.elapsed * 1.9) * cur);
+      var alphaFar = (dist < 0 ? 0.85 : 1) / (1 + adist * 2.6);
+      var alphaCur = cur * (s.time >= line.t - 0.2 ? 0.68 : 0.55);
+      var alpha = alphaCur + alphaFar * (1 - cur);
+      var baseY = cy + dist * (fontPx * 0.95);
+      var baseX = cx + (w * 0.02 - w * 0.08 * cur) * motion;
+      var roll = -0.05 + 0.15 * clamp(-dist, 0, 1) - 0.04 * clamp(dist, 0, 1);
 
       g.save();
       g.translate(baseX, baseY);
       g.rotate(roll * motion);
-      g.font = (dist === 0 ? '700 ' : '600 ') + Math.round(pxSize) + 'px ' + ((typeof LyricTunings !== 'undefined') ? LyricTunings.fontStack() : FONT);
+      g.font = (cur > 0.5 ? '700 ' : '600 ') + Math.round(pxSize) + 'px ' + ((typeof LyricTunings !== 'undefined') ? LyricTunings.fontStack() : FONT);
       g.textBaseline = 'middle';
       g.textAlign = 'left';
 
@@ -2314,18 +2629,20 @@ var BuiltinLyricModes = (function () {
       var startX = -total / 2;
       for (var ci = 0; ci < chars.length; ci++) {
         var ch = chars[ci];
-        var jitterY = dist === 0 ? (rand(ci, 5) - 0.5) * 10 * motion : 0;
-        var charRoll = dist === 0 ? (rand(ci, 6) - 0.5) * 0.2 * motion : 0;
+        var jitterY = (rand(ci, 5) - 0.5) * 10 * motion * cur;
+        var charRoll = (rand(ci, 6) - 0.5) * 0.2 * motion * cur;
         var isSung = s.time >= ch.start;
         var p = LyricTiming.charProgress(ch, s.time);
         g.save();
         g.translate(startX + widths[ci] / 2, jitterY);
         g.rotate(charRoll);
-        g.globalAlpha = dist === 0 ? (isSung ? 0.92 : 0.55) : alpha;
-        g.fillStyle = dist === 0
-          ? hex(mixNumeric(0xffffff, keyword ? c.accent : 0xffffff, isSung ? 0.3 + 0.45 * p : 0))
+        g.globalAlpha = cur > 0.02
+          ? alpha * (1 - cur) + (isSung ? 0.92 : 0.55) * cur
+          : alpha;
+        g.fillStyle = cur > 0.02
+          ? hex(mixNumeric(0xffffff, keyword ? c.accent : 0xffffff, (isSung ? 0.3 + 0.45 * p : 0) * cur))
           : '#ffffff';
-        if (dist === 0 && isSung && glowOn) {
+        if (cur > 0.5 && isSung && glowOn) {
           g.shadowColor = cssRgba(c.accent, 0.6 * glowMul);
           g.shadowBlur = pxSize * 0.16 * glowMul;
         } else {
@@ -2514,21 +2831,25 @@ var BuiltinLyricModes = (function () {
       g.fill();
     }
 
-    // 弧上歌词
+    // 弧上歌词：角度跟连续 offset 走，轮盘转、字也跟着滑，不再一格一格硬跳
     g.textBaseline = 'middle';
     g.textAlign = 'left';
-    for (var li = idx - 7; li <= idx + 7; li++) {
+    var offP = this.offset;
+    for (var li = Math.floor(offP) - 7; li <= Math.ceil(offP) + 7; li++) {
       var line = lines[li];
       if (!line || !line.text) continue;
-      var dist = li - idx;
+      var dist = li - offP;
+      var adist = Math.abs(dist);
       var a = dist * step;
       var absA = Math.abs(a);
       if (absA >= Math.PI / 2) continue;
-      var opacity = Math.max(0.12, Math.pow(Math.max(0, Math.cos(a * 0.75)), 2.5) * (1 - Math.abs(dist) * 0.18));
+      var opacity = Math.max(0.12, Math.pow(Math.max(0, Math.cos(a * 0.75)), 2.5) * (1 - adist * 0.18));
       if (absA > 1.24) opacity *= Math.max(0, (Math.PI / 2 - absA) / 0.33);
       if (opacity <= 0.01) continue;
-      var isFocus = dist === 0;
-      var px = isFocus ? focusPx : Math.max(12, otherPx * Math.max(0.7, 1 - Math.abs(dist) * 0.08));
+      var curP = Math.max(0, 1 - adist * 2);
+      var isFocus = curP > 0.5;
+      var pxBase = Math.max(12, otherPx * Math.max(0.7, 1 - adist * 0.08));
+      var px = pxBase + (focusPx - pxBase) * curP;
       var x = cx + lr * Math.cos(a);
       var y = cy + lr * Math.sin(a);
       var innerRot = a * 1.2 * 0.65;
@@ -2627,7 +2948,11 @@ var BuiltinLyricModes = (function () {
 
   SonnetScene.prototype.onLine = function (s) {
     if (!this.cv) this.mount();
-    this.stage.textContent = '';
+    var oldLayer = this.wordLayer;
+    if (oldLayer && oldLayer.parentNode) {
+      // 旧句整层退场，不再 textContent='' 一刀切
+      this.retire(oldLayer, { dur: 0.30, blur: 7 });
+    }
     this.words = [];
     var line = s.line;
     var base = this.noCommonFontScale ? 1 : 1;
@@ -2646,6 +2971,9 @@ var BuiltinLyricModes = (function () {
     var heroPx = Math.min(this.width * 0.4, this.height * 0.36, basePx * (2.4 + rnd() * 0.8), this.width * 0.82 / Math.max(1, words[heroIndex].length));
     var supportPx = clamp(basePx * (0.55 + rnd() * 0.25), 16, 60);
 
+    var layer = el('div', 'position:absolute;inset:0;', this.stage);
+    this.wordLayer = layer;
+
     var before = [];
     var after = [];
     for (var g = 0; g < words.length; g++) {
@@ -2653,20 +2981,23 @@ var BuiltinLyricModes = (function () {
       (g < heroIndex ? before : after).push(g);
     }
 
+    var pending = [];
     for (var w = 0; w < words.length; w++) {
       var isHero = w === heroIndex;
-      var word = el('div', 'position:absolute;white-space:nowrap;transform-origin:center;opacity:0;will-change:transform,opacity;', this.stage);
+      var word = el('div', 'position:absolute;white-space:nowrap;transform-origin:center;will-change:transform,opacity;', layer);
       word.textContent = words[w];
       word.style.fontWeight = isHero ? '900' : '700';
       word.style.fontSize = (isHero ? heroPx : supportPx * (0.9 + rnd() * 0.4)) + 'px';
       word.style.lineHeight = '1.2';
       word.style.color = '#ffffff';
-      var left, top;
+      var left, top, from, to;
       if (isHero) {
         left = 50 + (rnd() - 0.5) * 6;
         top = 45;
         word.style.textAlign = 'center';
-        word.style.transform = 'translate(-50%,-50%) rotate(' + ((rnd() - 0.5) * 3).toFixed(1) + 'deg) scale(.86)';
+        var rotH = ((rnd() - 0.5) * 3).toFixed(1);
+        from = 'translate(-50%,-50%) rotate(' + rotH + 'deg) scale(.86)';
+        to = 'translate(-50%,-50%) rotate(' + rotH + 'deg) scale(1)';
       } else {
         var group = w < heroIndex ? before : after;
         var pos = group.indexOf(w);
@@ -2674,23 +3005,30 @@ var BuiltinLyricModes = (function () {
         left = 50 + ((pos + 0.5) / m - 0.5) * 74 + (rnd() - 0.5) * 4;
         left = clamp(left, 10, 90);
         top = (w < heroIndex ? 17 : 76) + (rnd() - 0.5) * 8;
-        word.style.transform = 'translate(-50%,-50%) rotate(' + ((rnd() - 0.5) * 8).toFixed(1) + 'deg) scale(.9)';
+        var rotS = ((rnd() - 0.5) * 8).toFixed(1);
+        from = 'translate(-50%,-50%) rotate(' + rotS + 'deg) scale(.9)';
+        to = 'translate(-50%,-50%) rotate(' + rotS + 'deg) scale(1)';
         word.style.color = 'rgba(255,255,255,.72)';
       }
       word.style.left = left + '%';
       word.style.top = top + '%';
-      this.stage.appendChild(word);
+      word.style.transition = 'none';
+      word.style.opacity = '0';
+      word.style.transform = from;
+      layer.appendChild(word);
       this.words.push({ el: word, isHero: isHero });
-      (function (node, delay, isHeroWord, tx) {
-        setTimeout(function () {
-          if (!node.parentNode) return;
-          node.style.transition = 'opacity .6s ease, transform .7s cubic-bezier(.16,1,.3,1)';
-          node.style.transitionDelay = (delay * 0.06).toFixed(2) + 's, ' + (delay * 0.06).toFixed(2) + 's';
-          node.style.opacity = '1';
-          node.style.transform = tx.replace(' scale(.86)', ' scale(1)').replace(' scale(.9)', ' scale(1)');
-        }, 20);
-      })(word, w, isHero, word.style.transform);
+      pending.push({ el: word, to: to });
       if (isHero) word.style.textShadow = '2px 0 rgba(0,255,255,.3), -2px 0 rgba(255,0,68,.3)';
+    }
+
+    // 先结算初值，再统一触发入场：错峰压到 0.035s/词、总长 0.18s
+    void layer.offsetWidth;
+    for (var pi = 0; pi < pending.length; pi++) {
+      var p = pending[pi];
+      var d = Math.min(0.18, pi * 0.035).toFixed(2);
+      p.el.style.transition = 'opacity .5s ease ' + d + 's, transform .56s cubic-bezier(.16,1,.3,1) ' + d + 's';
+      p.el.style.opacity = '1';
+      p.el.style.transform = p.to;
     }
 
     var tr = currentTr(s);
@@ -2852,8 +3190,11 @@ var BuiltinLyricModes = (function () {
     var line = s.line;
     var base = this.noCommonFontScale ? 1 : (this.fontScale || 1);
     var words = sonnetWords(line);
-    this.curEl.textContent = '';
+    var oldLayer = this.lineLayer;
+    if (oldLayer && oldLayer.parentNode) this.retire(oldLayer, { dur: 0.30, blur: 6 });
     if (!words.length) return;
+    var layer = el('div', 'position:absolute;inset:0;', this.curEl);
+    this.lineLayer = layer;
 
     var graphemes = Array.from(String(line.text).replace(/\s+/g, '')).length;
     var basePx = Math.max(30, Math.min(100, this.width / Math.max(6, graphemes * 1.35))) * base;
@@ -2873,8 +3214,9 @@ var BuiltinLyricModes = (function () {
     for (var w = 0; w < words.length; w++) rows[Math.min(rowCount - 1, Math.floor(w / perRow))].push(w);
 
     var k = 0;
+    var pending = [];
     for (var ri = 0; ri < rows.length; ri++) {
-      var rowEl = el('div', 'position:absolute;left:50%;white-space:nowrap;display:flex;align-items:baseline;gap:.18em;', this.curEl);
+      var rowEl = el('div', 'position:absolute;left:50%;white-space:nowrap;display:flex;align-items:baseline;gap:.18em;', layer);
       rowEl.style.top = (50 + (ri - (rowCount - 1) / 2) * 22 + (rnd() - 0.5) * 3) + '%';
       var rowWidth = 0;
       for (var rw = 0; rw < rows[ri].length; rw++) {
@@ -2894,16 +3236,18 @@ var BuiltinLyricModes = (function () {
         sp.style.transform = 'rotate(' + ((rnd() - 0.5) * 4).toFixed(1) + 'deg) translateY(' + ((rnd() - 0.5) * 0.09).toFixed(2) + 'em)';
         sp.style.opacity = '0';
         rowEl.appendChild(sp);
-        (function (node, delay) {
-          setTimeout(function () {
-            if (!node.parentNode) return;
-            node.style.transition = 'opacity .5s ease, transform .65s cubic-bezier(.22,1,.36,1)';
-            node.style.transitionDelay = (delay * 0.09).toFixed(2) + 's';
-            node.style.opacity = '1';
-          }, 20);
-        })(sp, k++);
+        pending.push(sp);
       }
-      this.curEl.appendChild(rowEl);
+      layer.appendChild(rowEl);
+    }
+
+    // 先结算初值再统一入场：错峰 0.032s/词、总长封顶 0.22s
+    void layer.offsetWidth;
+    for (var pk = 0; pk < pending.length; pk++) {
+      var node = pending[pk];
+      var d = Math.min(0.22, pk * 0.032).toFixed(2);
+      node.style.transition = 'opacity .46s ease ' + d + 's, transform .56s cubic-bezier(.22,1,.36,1) ' + d + 's';
+      node.style.opacity = '1';
     }
 
     var mark = Array.from(String(line.text).replace(/\s+/g, '')).slice(-1)[0] || '';
